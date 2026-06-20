@@ -327,7 +327,7 @@ export default function RunMonitor() {
               />
               <TestCaseTheatre
                 testCase={selectedCase}
-                currentStep={selectedCase ? (stepIndex[selectedCase.id] ?? -1) : -1}
+                currentStep={selectedCase ? (stepIndex[selectedCase.id] ?? (selectedCase.status !== "running" ? (selectedCase.steps?.length ?? 0) - 1 : -1)) : -1}
               />
             </TabsContent>
 
