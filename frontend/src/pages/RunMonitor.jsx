@@ -5,16 +5,19 @@ import SiteHeader from "@/components/SiteHeader";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import AtmosMark from "@/components/AtmosMark";
+import { TestCaseList, TestCaseTheatre } from "@/components/TestCases";
+import IssueDiffCard from "@/components/IssueDiffCard";
 import {
-  ArrowUpRight, Eye, FileText, Activity, AlertTriangle, AlertOctagon, ShieldCheck,
-  MousePointerClick, Smartphone, Gauge, Sparkles, GitCompare, Accessibility, Mic, CheckCircle2,
+  ArrowUpRight, Eye, FileText, Activity, AlertTriangle, AlertOctagon,
+  MousePointerClick, Smartphone, Gauge, Sparkles, GitCompare, Accessibility, Mic, CheckCircle2, FlaskConical,
 } from "lucide-react";
 
 const PHASE_ICONS = {
   analyze: Sparkles, explore: MousePointerClick, mobile: Smartphone,
   accessibility: Accessibility, personas: Eye, issues: AlertTriangle,
-  benchmark: Gauge, report: FileText,
+  test_cases: FlaskConical, benchmark: Gauge, report: FileText,
 };
 const SEV_COLOR = { critical: "#FF3B30", high: "#FF3B30", medium: "#FF9500", low: "#86868B" };
 
@@ -140,11 +143,44 @@ export default function RunMonitor() {
   const focusEv = events.find((e) => e.kind === "plan");
   const focusAreas = focusEv?.focus_areas || [];
 
+  // Fold test_case + test_case_step events into a stateful map.
+  const { testCases, stepIndex, activeRunningId } = useMemo(() => {
+    const tcs = new Map();
+    const steps = {};
+    let active = null;
+    for (const ev of events) {
+      if (ev.kind === "test_case") {
+        const existing = tcs.get(ev.id) || {};
+        tcs.set(ev.id, { ...existing, ...ev });
+        if (ev.status === "running") active = ev.id;
+      } else if (ev.kind === "test_case_step") {
+        steps[ev.case_id] = ev.step_index;
+      }
+    }
+    return { testCases: Array.from(tcs.values()), stepIndex: steps, activeRunningId: active };
+  }, [events]);
+
+  const [activeTab, setActiveTab] = useState("live");
+  const [selectedCaseId, setSelectedCaseId] = useState(null);
+
+  // Auto-switch focus: when test_cases phase begins, prefer that tab; auto-select the running case.
+  useEffect(() => {
+    if (testCases.length > 0 && activeTab === "live" && !done) {
+      setActiveTab("cases");
+    }
+  }, [testCases.length, activeTab, done]);
+  useEffect(() => {
+    if (activeRunningId) setSelectedCaseId(activeRunningId);
+    else if (!selectedCaseId && testCases.length > 0) setSelectedCaseId(testCases[0].id);
+  }, [activeRunningId, testCases, selectedCaseId]);
+
+  const selectedCase = testCases.find((tc) => tc.id === selectedCaseId);
+
   const latestShot = screenshots[screenshots.length - 1];
   const currentPhase = phases[phases.length - 1];
 
   const progress = useMemo(() => {
-    const total = 8; // analyze, explore, mobile, a11y, personas, issues, benchmark, report
+    const total = 9; // analyze, explore, mobile, a11y, personas, issues, test_cases, benchmark, report
     const seen = new Set(phases.map((p) => p.phase));
     return Math.round((seen.size / total) * 100);
   }, [phases]);
@@ -204,68 +240,106 @@ export default function RunMonitor() {
           </div>
         </div>
 
-        {/* LEFT: cinematic mock + feed */}
+        {/* LEFT: tabbed view — live capture / test cases (with playback) / issues with diffs */}
         <section className="lg:col-span-8 space-y-4 md:space-y-6">
-          {/* Mock browser */}
-          <div className="card-elev p-4 md:p-5" data-testid="cinematic-panel">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2 text-xs text-[#86868B] uppercase tracking-[0.2em]">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#FF3B30] live-dot" />
-                Cinematic capture
-              </div>
-              {currentPhase && (
-                <div className="text-xs text-[#86868B]">{currentPhase.label}</div>
-              )}
-            </div>
-            <MockBrowser
-              url={project?.url}
-              action={latestShot?.action}
-              target={latestShot?.target}
-              viewport={latestShot?.viewport}
-            />
-            {screenshots.length > 0 && (
-              <div className="mt-4 grid grid-cols-6 gap-2">
-                {screenshots.slice(-6).map((s, i) => (
-                  <div key={s.seq} className="rounded-md aspect-video bg-gradient-to-br from-[#F5F5F7] to-white border border-black/5 relative overflow-hidden">
-                    <div className="absolute inset-0 dot-grid opacity-50" />
-                    <div className="absolute bottom-1 left-1 right-1 text-[9px] font-mono text-[#1D1D1F]/70 truncate">{s.action} {s.target}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+            <TabsList className="bg-white border border-black/10 rounded-full h-11 p-1" data-testid="run-tabs">
+              <TabsTrigger value="live" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-live">
+                Live capture
+              </TabsTrigger>
+              <TabsTrigger value="cases" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-cases">
+                Test cases {testCases.length > 0 && <span className="ml-1.5 text-xs opacity-70">({testCases.length})</span>}
+              </TabsTrigger>
+              <TabsTrigger value="issues" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-issues">
+                Issues {issues.length > 0 && <span className="ml-1.5 text-xs opacity-70">({issues.length})</span>}
+              </TabsTrigger>
+            </TabsList>
 
-          {/* Terminal feed */}
-          <div className="terminal p-4 md:p-5" data-testid="activity-feed">
-            <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.2em] text-white/40 mb-3">
-              <span>Activity feed</span>
-              <span>{events.length} events</span>
-            </div>
-            <ScrollArea className="h-72 scrollbar-thin">
-              <div ref={feedRef} className="space-y-1 pr-2">
-                {logs.map((l) => (
-                  <div key={l.seq} className="flex gap-3 anim-slide-up">
-                    <span className="text-white/30 tabular-nums shrink-0">{new Date(l.ts).toLocaleTimeString([], { hour12: false })}</span>
-                    <span className="text-white/85 break-words">{l.message}</span>
+            {/* LIVE */}
+            <TabsContent value="live" className="space-y-4 md:space-y-6 mt-4">
+              <div className="card-elev p-4 md:p-5" data-testid="cinematic-panel">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2 text-xs text-[#86868B] uppercase tracking-[0.2em]">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#FF3B30] live-dot" />
+                    Cinematic capture
                   </div>
-                ))}
-                {phases.map((p) => (
-                  <div key={`p-${p.seq}`} className="flex gap-3 anim-slide-up">
-                    <span className="text-white/30 tabular-nums shrink-0">{new Date(p.ts).toLocaleTimeString([], { hour12: false })}</span>
-                    <span className="text-[#0A84FF]">▸ {p.label}</span>
+                  {currentPhase && (
+                    <div className="text-xs text-[#86868B]">{currentPhase.label}</div>
+                  )}
+                </div>
+                <MockBrowser
+                  url={project?.url}
+                  action={latestShot?.action}
+                  target={latestShot?.target}
+                  viewport={latestShot?.viewport}
+                />
+                {screenshots.length > 0 && (
+                  <div className="mt-4 grid grid-cols-6 gap-2">
+                    {screenshots.slice(-6).map((s) => (
+                      <div key={s.seq} className="rounded-md aspect-video bg-gradient-to-br from-[#F5F5F7] to-white border border-black/5 relative overflow-hidden">
+                        <div className="absolute inset-0 dot-grid opacity-50" />
+                        <div className="absolute bottom-1 left-1 right-1 text-[9px] font-mono text-[#1D1D1F]/70 truncate">{s.action} {s.target}</div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-                {issues.map((i) => (
-                  <div key={`i-${i.seq}`} className="flex gap-3 anim-slide-up">
-                    <span className="text-white/30 tabular-nums shrink-0">{new Date(i.ts).toLocaleTimeString([], { hour12: false })}</span>
-                    <span style={{ color: SEV_COLOR[i.severity] || "#fff" }}>
-                      {i.severity}  {i.title} <span className="text-white/40">— {i.file}</span>
-                    </span>
-                  </div>
-                ))}
+                )}
               </div>
-            </ScrollArea>
-          </div>
+
+              <div className="terminal p-4 md:p-5" data-testid="activity-feed">
+                <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.2em] text-white/40 mb-3">
+                  <span>Activity feed</span>
+                  <span>{events.length} events</span>
+                </div>
+                <ScrollArea className="h-72 scrollbar-thin">
+                  <div ref={feedRef} className="space-y-1 pr-2">
+                    {logs.map((l) => (
+                      <div key={l.seq} className="flex gap-3 anim-slide-up">
+                        <span className="text-white/30 tabular-nums shrink-0">{new Date(l.ts).toLocaleTimeString([], { hour12: false })}</span>
+                        <span className="text-white/85 break-words">{l.message}</span>
+                      </div>
+                    ))}
+                    {phases.map((p) => (
+                      <div key={`p-${p.seq}`} className="flex gap-3 anim-slide-up">
+                        <span className="text-white/30 tabular-nums shrink-0">{new Date(p.ts).toLocaleTimeString([], { hour12: false })}</span>
+                        <span className="text-[#0A84FF]">▸ {p.label}</span>
+                      </div>
+                    ))}
+                    {issues.map((i) => (
+                      <div key={`i-${i.seq}`} className="flex gap-3 anim-slide-up">
+                        <span className="text-white/30 tabular-nums shrink-0">{new Date(i.ts).toLocaleTimeString([], { hour12: false })}</span>
+                        <span style={{ color: SEV_COLOR[i.severity] || "#fff" }}>
+                          {i.severity}  {i.title} <span className="text-white/40">— {i.file}</span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              </div>
+            </TabsContent>
+
+            {/* TEST CASES */}
+            <TabsContent value="cases" className="grid md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-4 mt-4" data-testid="tab-cases-content">
+              <TestCaseList
+                cases={testCases}
+                activeId={selectedCaseId}
+                onSelect={setSelectedCaseId}
+                currentSteps={stepIndex}
+              />
+              <TestCaseTheatre
+                testCase={selectedCase}
+                currentStep={selectedCase ? (stepIndex[selectedCase.id] ?? -1) : -1}
+              />
+            </TabsContent>
+
+            {/* ISSUES (diff cards) */}
+            <TabsContent value="issues" className="space-y-4 mt-4" data-testid="tab-issues-content">
+              {issues.length === 0 ? (
+                <div className="card-elev p-10 text-center text-sm text-[#86868B]">Atmos hasn&apos;t surfaced issues yet — they appear here with before / after diffs.</div>
+              ) : (
+                issues.map((iss) => <IssueDiffCard key={iss.id} issue={iss} />)
+              )}
+            </TabsContent>
+          </Tabs>
         </section>
 
         {/* RIGHT */}
@@ -274,7 +348,7 @@ export default function RunMonitor() {
           <div className="card-elev p-5">
             <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-4">Phases</div>
             <div className="space-y-2">
-              {["analyze", "explore", "mobile", "accessibility", "personas", "issues", "benchmark", "report"].map((ph) => {
+              {["analyze", "explore", "mobile", "accessibility", "personas", "issues", "test_cases", "benchmark", "report"].map((ph) => {
                 const reached = phases.some((p) => p.phase === ph);
                 const Icon = PHASE_ICONS[ph] || Activity;
                 return (

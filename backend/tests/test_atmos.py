@@ -126,8 +126,8 @@ class TestProjectsAndRuns:
         assert data["project"]["project_id"] == pytest.project_id
         assert isinstance(data["events"], list)
 
-        # Wait up to 60s for completion
-        deadline = time.time() + 60
+        # Wait up to 90s for completion (run length ~45-55s + buffer)
+        deadline = time.time() + 90
         status = None
         last_events = 0
         while time.time() < deadline:
@@ -154,6 +154,55 @@ class TestProjectsAndRuns:
         assert len(summary["personas"]) >= 5
         assert len(summary["issues"]) >= 5
         assert len(summary["benchmarks"]) >= 1
+
+        # --- NEW: issues must carry scene + before + after + alternatives ---
+        for iss in summary["issues"]:
+            assert "scene" in iss and isinstance(iss["scene"], str) and iss["scene"]
+            assert "before" in iss and isinstance(iss["before"], dict)
+            assert "headline" in iss["before"] and "detail" in iss["before"]
+            assert "after" in iss and isinstance(iss["after"], dict)
+            assert "headline" in iss["after"] and "detail" in iss["after"]
+            assert "code" in iss["after"], f"after.code missing for {iss.get('id')}"
+            assert "alternatives" in iss and isinstance(iss["alternatives"], list)
+            assert len(iss["alternatives"]) == 2, f"expected 2 alternatives, got {len(iss['alternatives'])}"
+            for alt in iss["alternatives"]:
+                for k in ("label", "summary", "tradeoff", "scene_variant"):
+                    assert k in alt, f"alt missing {k}"
+
+        # --- NEW: test_cases shape ---
+        assert "test_cases" in summary
+        cases = summary["test_cases"]
+        assert isinstance(cases, list) and len(cases) > 0
+        for tc in cases:
+            for k in ("id", "name", "category", "scene", "steps",
+                     "status", "expected_result", "explanation"):
+                assert k in tc, f"test_case missing {k}"
+            assert isinstance(tc["steps"], list) and len(tc["steps"]) >= 1
+            assert all(isinstance(s, str) for s in tc["steps"])
+            assert tc["status"] in ("pass", "fail", "warn"), tc["status"]
+
+        # --- NEW: event stream — required kinds + phase=test_cases between issues & benchmark ---
+        pytest.events_snapshot = data["events"]
+        kinds = {e["kind"] for e in data["events"]}
+        required_kinds = {"log", "plan", "phase", "screenshot", "viewport",
+                          "persona", "issue", "test_case", "test_case_step",
+                          "benchmark", "summary"}
+        missing = required_kinds - kinds
+        assert not missing, f"event stream missing kinds: {missing}"
+
+        phase_order = [e["phase"] for e in data["events"] if e["kind"] == "phase"]
+        assert "test_cases" in phase_order
+        i_idx = phase_order.index("issues")
+        t_idx = phase_order.index("test_cases")
+        b_idx = phase_order.index("benchmark")
+        assert i_idx < t_idx < b_idx, f"phase ordering wrong: {phase_order}"
+
+        # test_case start/end + step_index present
+        tc_phases = [e.get("phase") for e in data["events"] if e["kind"] == "test_case"]
+        assert "start" in tc_phases and "end" in tc_phases
+        steps = [e for e in data["events"] if e["kind"] == "test_case_step"]
+        assert len(steps) >= 1
+        assert all("step_index" in e for e in steps)
 
 
 # --- Authorization isolation ---------------------------------------------

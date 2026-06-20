@@ -521,44 +521,438 @@ async def _llm_report(project: dict[str, Any], command: str, focus_areas: list[s
 
 
 def _seed_issues(app_type: str) -> list[dict[str, Any]]:
+    """Each issue carries a render-spec the frontend uses to visualize the problem,
+    Atmos's executed fix, and two alternative fixes.
+
+    Schema:
+        category, severity, title, file, cause,
+        scene: identifier the frontend renders ("cta-overlap", "aria-form", "deep-nav",
+                "focus-ring", "empty-crash", "image-lcp", "currency-precision",
+                "deep-checkout", "calendar-clip", "dst-doublebook", "grid-freeze",
+                "card-overload", "error-jargon", "coupon-negative"),
+        before: { headline, detail },
+        after:  { headline, detail, code? },
+        alternatives: [ { label, summary, tradeoff, scene_variant }, ... ]
+    """
+    def alts(*items):
+        return list(items)
+
     common = [
-        {"category": "Visual", "severity": "high", "title": "Primary CTA overlaps footer on iPhone SE",
-         "file": "components/Footer.tsx", "cause": "Flex container overflow at <380px"},
-        {"category": "Accessibility", "severity": "critical", "title": "Sign-in form inputs missing aria-label",
-         "file": "pages/auth/SignIn.tsx", "cause": "Missing accessible name on email/password fields"},
-        {"category": "UX", "severity": "medium", "title": "8 clicks to reach primary action",
-         "file": "router.tsx", "cause": "Deep nav hierarchy; entry point hidden under menu"},
-        {"category": "Visual", "severity": "low", "title": "Focus ring invisible on dark surfaces",
-         "file": "styles/focus.css", "cause": "outline color matches background-color"},
-        {"category": "Functional", "severity": "high", "title": "Empty state crashes on stale cache",
-         "file": "hooks/useProjects.ts", "cause": "Unhandled null on first paint"},
-        {"category": "Performance", "severity": "medium", "title": "Hero image at 2.4 MB blocks LCP",
-         "file": "public/hero.png", "cause": "Unoptimized asset, no responsive srcSet"},
+        {
+            "category": "Visual", "severity": "high",
+            "title": "Primary CTA overlaps footer on iPhone SE",
+            "file": "components/Footer.tsx",
+            "cause": "Flex container overflow at <380px viewport.",
+            "scene": "cta-overlap",
+            "before": {"headline": "Tap target collides with footer",
+                       "detail": "Pay button overlaps copyright text at 375×667. Users tap the wrong target ~14% of attempts."},
+            "after": {"headline": "Stacked column at <420px",
+                      "detail": "Footer drops below the CTA via flex-wrap and a sticky safe-area inset.",
+                      "code": "footer{flex-wrap:wrap; padding-bottom:env(safe-area-inset-bottom);}"},
+            "alternatives": alts(
+                {"label": "Sticky bottom-sheet CTA", "scene_variant": "sticky",
+                 "summary": "Pin the primary CTA to the bottom in a translucent bar; footer scrolls under it.",
+                 "tradeoff": "Loses 56px of content height. Best for high-conversion checkout pages."},
+                {"label": "Move footer to settings drawer", "scene_variant": "drawer",
+                 "summary": "Demote legal/links into a profile drawer; footer disappears below the fold.",
+                 "tradeoff": "Reduces footer discoverability — only suitable when legal links are duplicated elsewhere."},
+            ),
+        },
+        {
+            "category": "Accessibility", "severity": "critical",
+            "title": "Sign-in form inputs missing aria-label",
+            "file": "pages/auth/SignIn.tsx",
+            "cause": "Inputs identified only by placeholder text — invisible to screen readers.",
+            "scene": "aria-form",
+            "before": {"headline": "Screen reader announces \"edit, edit\"",
+                       "detail": "Email & password fields rely on placeholder; NVDA / VoiceOver have no accessible name."},
+            "after": {"headline": "Persistent labels above each field",
+                      "detail": "Visible <label> elements bound by htmlFor + aria-describedby for error messages.",
+                      "code": "<label htmlFor=\"email\">Email</label><input id=\"email\" aria-describedby=\"email-err\"/>"},
+            "alternatives": alts(
+                {"label": "Floating labels", "scene_variant": "float",
+                 "summary": "Material-style floating labels animate up when the field is focused.",
+                 "tradeoff": "Trickier to localize and clipped at 200% zoom — but feels more compact."},
+                {"label": "Inline icon + aria-label", "scene_variant": "icon",
+                 "summary": "Keep the icon-only look; add aria-label=\"Email address\" to each input.",
+                 "tradeoff": "Visible UI unchanged but visual users lose the help that labels provide."},
+            ),
+        },
+        {
+            "category": "UX", "severity": "medium",
+            "title": "8 clicks to reach primary action",
+            "file": "router.tsx",
+            "cause": "Deep nav hierarchy; the primary action is hidden under a hamburger.",
+            "scene": "deep-nav",
+            "before": {"headline": "8 hops to start the main task",
+                       "detail": "Hamburger → menu → submenu → tab → list → row → modal → CTA."},
+            "after": {"headline": "Global primary action in the header",
+                      "detail": "Expose the primary verb as a persistent button next to the search bar.",
+                      "code": "<Header><PrimaryAction/></Header>  // visible on every page"},
+            "alternatives": alts(
+                {"label": "Command palette (⌘K)", "scene_variant": "palette",
+                 "summary": "Add a ⌘K palette so power users can fire any action with one keystroke.",
+                 "tradeoff": "Adds shortcut discoverability load — pair with an onboarding tooltip."},
+                {"label": "Persistent left-rail with 5 actions", "scene_variant": "rail",
+                 "summary": "Surface the 5 most-used verbs as a left rail visible on every page.",
+                 "tradeoff": "Steals ~64px of horizontal real estate; great for dashboards."},
+            ),
+        },
+        {
+            "category": "Visual", "severity": "low",
+            "title": "Focus ring invisible on dark surfaces",
+            "file": "styles/focus.css",
+            "cause": "outline color near-matches background; <2:1 contrast on dark elements.",
+            "scene": "focus-ring",
+            "before": {"headline": "Keyboard users get lost",
+                       "detail": "outline: 1px solid rgba(255,255,255,0.05) on dark surfaces — invisible."},
+            "after": {"headline": "WCAG-compliant focus ring",
+                      "detail": "2px solid Brand Blue + 2px white offset — visible on any surface.",
+                      "code": ":focus-visible{outline:2px solid #0071E3; outline-offset:2px;}"},
+            "alternatives": alts(
+                {"label": "Inset focus glow", "scene_variant": "glow",
+                 "summary": "box-shadow inset glow rather than outline — works inside overflow:hidden parents.",
+                 "tradeoff": "Slightly heavier visually; great for cards with rounded corners."},
+                {"label": "Background tint on focus", "scene_variant": "tint",
+                 "summary": "Tint the element background 10% on focus instead of an outline.",
+                 "tradeoff": "Calmer but less explicit — pair with outline for AAA."},
+            ),
+        },
+        {
+            "category": "Functional", "severity": "high",
+            "title": "Empty state crashes on stale cache",
+            "file": "hooks/useProjects.ts",
+            "cause": "Null projects array dereferenced before first paint.",
+            "scene": "empty-crash",
+            "before": {"headline": "White screen of death",
+                       "detail": "TypeError: Cannot read properties of null (reading 'length')."},
+            "after": {"headline": "Graceful empty state",
+                      "detail": "Optional chaining + skeleton on undefined, illustrated empty state on [].",
+                      "code": "const list = data?.projects ?? [];\nif (!list.length) return <EmptyState/>;"},
+            "alternatives": alts(
+                {"label": "Optimistic seed state", "scene_variant": "seed",
+                 "summary": "Render an example project card so the UI never feels empty on first load.",
+                 "tradeoff": "Adds tutorial-style content; can confuse repeat users."},
+                {"label": "Error boundary + retry", "scene_variant": "retry",
+                 "summary": "Wrap the route in an error boundary with a Retry button.",
+                 "tradeoff": "Less elegant but catches every runtime error in the subtree."},
+            ),
+        },
+        {
+            "category": "Performance", "severity": "medium",
+            "title": "Hero image at 2.4 MB blocks LCP",
+            "file": "public/hero.png",
+            "cause": "Unoptimized asset, no responsive srcSet, no AVIF/WebP.",
+            "scene": "image-lcp",
+            "before": {"headline": "LCP 4.8s on 4G",
+                       "detail": "Single 2.4 MB PNG served to every device. No width hints."},
+            "after": {"headline": "LCP 1.1s",
+                      "detail": "AVIF + WebP fallback, srcSet at 480/960/1440, fetchpriority=high.",
+                      "code": "<img srcSet=\"hero-480.avif 480w, hero-960.avif 960w\" fetchpriority=\"high\"/>"},
+            "alternatives": alts(
+                {"label": "CSS gradient hero", "scene_variant": "gradient",
+                 "summary": "Replace image with a tuned CSS gradient — 0 KB hero.",
+                 "tradeoff": "Loses product photography; suits brand/marketing pages."},
+                {"label": "Lazy hero with LQIP", "scene_variant": "lqip",
+                 "summary": "Inline a 12-byte LQIP placeholder, lazy-load the full hero below the fold.",
+                 "tradeoff": "Quick flash from blur → sharp; pair with prefers-reduced-motion."},
+            ),
+        },
     ]
     specific = {
         "finance": [
-            {"category": "Functional", "severity": "critical", "title": "Currency precision loss at >$9,999.99",
-             "file": "lib/money.ts", "cause": "Number.parseFloat rounds at boundary"},
-            {"category": "UX", "severity": "high", "title": "Transaction error #405 shown verbatim to user",
-             "file": "components/PaymentError.tsx", "cause": "Backend code surfaced without translation"},
+            {
+                "category": "Functional", "severity": "critical",
+                "title": "Currency precision loss at >$9,999.99",
+                "file": "lib/money.ts",
+                "cause": "Number.parseFloat drops trailing precision past 4 integer digits.",
+                "scene": "currency-precision",
+                "before": {"headline": "$9,999.99 → $10,000",
+                           "detail": "Float math silently rounds. A $9,999.99 invoice is paid as $10,000."},
+                "after": {"headline": "Exact decimal arithmetic",
+                          "detail": "Use bigint cents or dinero.js. Never store money as Number.",
+                          "code": "import Dinero from 'dinero.js'; Dinero({amount: 999999, currency:'USD'})"},
+                "alternatives": alts(
+                    {"label": "Server-side authoritative totals", "scene_variant": "server",
+                     "summary": "Move the math to the server; client just renders. No JS Number math anywhere.",
+                     "tradeoff": "Roundtrip on every line-item edit; needs optimistic UI."},
+                    {"label": "Decimal.js across the stack", "scene_variant": "decimal",
+                     "summary": "Use Decimal.js end-to-end; richer API than Dinero, slightly larger bundle.",
+                     "tradeoff": "+12 KB bundle but cleaner ergonomics for tax & fee math."},
+                ),
+            },
+            {
+                "category": "UX", "severity": "high",
+                "title": "Transaction error #405 shown verbatim",
+                "file": "components/PaymentError.tsx",
+                "cause": "Raw backend code rendered to the user without translation.",
+                "scene": "error-jargon",
+                "before": {"headline": "\"Error #405\"",
+                           "detail": "User has no idea if money moved. Support tickets spike at checkout."},
+                "after": {"headline": "Plain-English assurance",
+                          "detail": "\"Your payment couldn't be processed. No funds were deducted. Please try again.\"",
+                          "code": "<Alert>Your payment couldn't be processed.<br/>No funds were deducted.</Alert>"},
+                "alternatives": alts(
+                    {"label": "Show next-best action", "scene_variant": "action",
+                     "summary": "After the apology, offer \"Try a different card\" and \"Pay later\" buttons.",
+                     "tradeoff": "Adds 2 buttons — needs UX writing review."},
+                    {"label": "Live-chat hand-off", "scene_variant": "chat",
+                     "summary": "Embed support chat opening with the error context pre-filled.",
+                     "tradeoff": "Requires staffed support; great for high-AOV flows."},
+                ),
+            },
         ],
         "e-commerce": [
-            {"category": "UX", "severity": "high", "title": "Checkout flow requires 7 clicks (industry: 4)",
-             "file": "pages/Checkout.tsx", "cause": "Address & shipping forced into separate steps"},
-            {"category": "Functional", "severity": "medium", "title": "Coupon stacking allows negative totals",
-             "file": "lib/coupons.ts", "cause": "Missing floor at zero in discount reducer"},
+            {
+                "category": "UX", "severity": "high",
+                "title": "Checkout requires 7 clicks (industry: 4)",
+                "file": "pages/Checkout.tsx",
+                "cause": "Address & shipping forced into separate steps.",
+                "scene": "deep-checkout",
+                "before": {"headline": "7-step checkout funnel",
+                           "detail": "Cart → Address → Shipping → Billing → Review → Confirm → Pay."},
+                "after": {"headline": "Single-page checkout",
+                          "detail": "One scrollable page with progressive disclosure of payment.",
+                          "code": "<CheckoutOnePage sections={[Address,Shipping,Payment]} />"},
+                "alternatives": alts(
+                    {"label": "Express checkout (Apple/Google Pay)", "scene_variant": "express",
+                     "summary": "Offer Apple Pay / Google Pay above the form — 0-click checkout for returning users.",
+                     "tradeoff": "Requires merchant approval; massive conversion lift on mobile."},
+                    {"label": "Two-step (auth + pay)", "scene_variant": "two",
+                     "summary": "Email first → auto-resume cart on the next page with everything pre-filled.",
+                     "tradeoff": "Adds 1 click vs single-page but lets you email cart-abandoners."},
+                ),
+            },
+            {
+                "category": "Functional", "severity": "medium",
+                "title": "Coupon stacking allows negative totals",
+                "file": "lib/coupons.ts",
+                "cause": "Missing floor at zero in discount reducer.",
+                "scene": "empty-crash",
+                "before": {"headline": "Total: -$3.20",
+                           "detail": "Two 50% codes stack; order completes at a negative total."},
+                "after": {"headline": "Total clamped at $0.00",
+                          "detail": "discount reducer wrapped in Math.max(0, …) and limited to one promo code per cart.",
+                          "code": "const total = Math.max(0, subtotal - discount);"},
+                "alternatives": alts(
+                    {"label": "Cap discount at 90%", "scene_variant": "cap",
+                     "summary": "Hard-cap any cart-level discount at 90% so merchants still capture revenue.",
+                     "tradeoff": "Some marketing campaigns rely on >90% — flag those explicitly."},
+                    {"label": "Single-coupon policy", "scene_variant": "single",
+                     "summary": "Only one promo code may apply at a time; offer the bigger one automatically.",
+                     "tradeoff": "Simpler math, less hacking — annoys couponers."},
+                ),
+            },
         ],
         "calendar": [
-            {"category": "Functional", "severity": "high", "title": "DST transition double-books recurring event",
-             "file": "lib/recurrence.ts", "cause": "Naive datetime arithmetic across DST"},
-            {"category": "Visual", "severity": "medium", "title": "Long event titles clip without ellipsis",
-             "file": "components/EventCard.tsx", "cause": "overflow:visible on grid cell"},
+            {
+                "category": "Functional", "severity": "high",
+                "title": "DST transition double-books recurring event",
+                "file": "lib/recurrence.ts",
+                "cause": "Naive datetime arithmetic across DST.",
+                "scene": "dst-doublebook",
+                "before": {"headline": "Two events at 9 AM on Mar 12",
+                           "detail": "Recurring weekly event materializes twice on DST day."},
+                "after": {"headline": "TZ-anchored RRULE expansion",
+                          "detail": "Use ical.js with the user's IANA tz; UTC arithmetic only.",
+                          "code": "RRULE:FREQ=WEEKLY;BYDAY=MO  // expand in user's IANA tz"},
+                "alternatives": alts(
+                    {"label": "Store float-time + tz separately", "scene_variant": "floattz",
+                     "summary": "Persist (wall_clock_time, tz) pairs; render from there.",
+                     "tradeoff": "More columns but trivially correct around DST."},
+                    {"label": "Switch to Temporal API polyfill", "scene_variant": "temporal",
+                     "summary": "Adopt the TC39 Temporal proposal via polyfill — eliminates the class of bug.",
+                     "tradeoff": "+18 KB polyfill; future-proof once Temporal ships natively."},
+                ),
+            },
+            {
+                "category": "Visual", "severity": "medium",
+                "title": "Long event titles clip without ellipsis",
+                "file": "components/EventCard.tsx",
+                "cause": "overflow:visible on grid cell.",
+                "scene": "calendar-clip",
+                "before": {"headline": "Title spills across columns",
+                           "detail": "\"Quarterly business review with…\" bleeds into next event."},
+                "after": {"headline": "Truncate with tooltip",
+                          "detail": "white-space:nowrap; overflow:hidden; text-overflow:ellipsis; <Tooltip/>",
+                          "code": ".event-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"},
+                "alternatives": alts(
+                    {"label": "Two-line clamp", "scene_variant": "clamp",
+                     "summary": "Allow up to 2 lines with -webkit-line-clamp before truncating.",
+                     "tradeoff": "Better readability on tall events, useless on 30-min slots."},
+                    {"label": "Hover-to-expand pop-out", "scene_variant": "popout",
+                     "summary": "Expand the card on hover with full content + actions.",
+                     "tradeoff": "Adds motion; conflicts with drag-to-resize."},
+                ),
+            },
         ],
         "dashboard": [
-            {"category": "Performance", "severity": "high", "title": "Large datasets freeze main thread at 10k rows",
-             "file": "components/DataGrid.tsx", "cause": "No virtualization; full re-render on filter"},
-            {"category": "UX", "severity": "medium", "title": "24 cards on first paint creates cognitive overload",
-             "file": "pages/Overview.tsx", "cause": "Unprioritized layout, no hero metric"},
+            {
+                "category": "Performance", "severity": "high",
+                "title": "Large datasets freeze main thread at 10k rows",
+                "file": "components/DataGrid.tsx",
+                "cause": "No virtualization; full re-render on filter.",
+                "scene": "grid-freeze",
+                "before": {"headline": "UI freezes for 6s",
+                           "detail": "Filtering 10k rows blocks the main thread; the page is non-interactive."},
+                "after": {"headline": "Virtualized + debounced filter",
+                          "detail": "Render only visible window with TanStack Virtual; debounce filter input.",
+                          "code": "useVirtualizer({count: rows.length, estimateSize:()=>40})"},
+                "alternatives": alts(
+                    {"label": "Server-side pagination", "scene_variant": "server",
+                     "summary": "Fetch 50 rows at a time; filter is a backend query.",
+                     "tradeoff": "Removes the freeze entirely but loses instant sort/search."},
+                    {"label": "Web Worker for filter", "scene_variant": "worker",
+                     "summary": "Move filtering into a Web Worker; main thread stays responsive.",
+                     "tradeoff": "Slight latency vs in-thread, but UI never blocks."},
+                ),
+            },
+            {
+                "category": "UX", "severity": "medium",
+                "title": "24 cards on first paint creates cognitive overload",
+                "file": "pages/Overview.tsx",
+                "cause": "Unprioritized layout, no hero metric.",
+                "scene": "card-overload",
+                "before": {"headline": "24 equal-weight cards",
+                           "detail": "Every metric screams for attention. First-time users bounce 38%."},
+                "after": {"headline": "1 hero + 6 secondary",
+                          "detail": "Promote the single most-important metric, demote the rest to small cards.",
+                          "code": "<Hero metric={topMetric}/><Grid cols={3}>{secondary.slice(0,6)}</Grid>"},
+                "alternatives": alts(
+                    {"label": "Bento grid with size weighting", "scene_variant": "bento",
+                     "summary": "Use a 12-col asymmetric bento; large = critical, small = passive.",
+                     "tradeoff": "Striking but harder to extend with new metrics."},
+                    {"label": "Tabs by audience", "scene_variant": "tabs",
+                     "summary": "Split into \"For me\" / \"Team\" / \"Org\" tabs; each shows 6 cards.",
+                     "tradeoff": "Adds a click but reduces per-screen density."},
+                ),
+            },
+        ],
+        "generic": [],
+    }
+    return common + specific.get(app_type, [])
+
+
+def _test_cases(app_type: str) -> list[dict[str, Any]]:
+    """Each test case is performed live on the mock UI with playback frames.
+
+    Schema: id, name, category, steps (array), status, evidence_frames (animation spec).
+    """
+    common = [
+        {
+            "name": "Navigation discoverability — primary action reachable in ≤3 clicks",
+            "category": "UX", "scene": "deep-nav",
+            "steps": ["Land on home", "Search for primary verb", "Tap CTA", "Confirm action panel opens"],
+            "expected_result": "fail",  # we expect deep nav to fail this
+            "explanation": "Primary action took 8 clicks. Threshold: 3.",
+        },
+        {
+            "name": "Keyboard-only form completion (TAB through sign-in)",
+            "category": "Accessibility", "scene": "aria-form",
+            "steps": ["Focus first field", "Type email", "Tab", "Type password", "Tab to Sign in", "Press Enter"],
+            "expected_result": "fail",
+            "explanation": "Inputs lack accessible names. Screen reader reports \"edit, edit\".",
+        },
+        {
+            "name": "Color contrast — every text/background pair ≥ 4.5:1",
+            "category": "Accessibility", "scene": "focus-ring",
+            "steps": ["Sample every text node", "Compute relative luminance", "Diff ratio"],
+            "expected_result": "warn",
+            "explanation": "3 pairs at 3.1:1 — below WCAG AA but above AA-Large.",
+        },
+        {
+            "name": "Touch target — every interactive ≥ 44×44 CSS px",
+            "category": "Accessibility", "scene": "cta-overlap",
+            "steps": ["Enumerate clickables", "Measure bounding boxes", "Flag <44px"],
+            "expected_result": "fail",
+            "explanation": "Footer link cluster at 24×24 px on iPhone SE.",
+        },
+        {
+            "name": "Responsive sweep — no horizontal scroll at any tested viewport",
+            "category": "Visual", "scene": "cta-overlap",
+            "steps": ["Resize to 344px", "Resize to 375px", "Resize to 768px", "Resize to 1440px"],
+            "expected_result": "pass",
+            "explanation": "No overflow detected at any tested viewport.",
+        },
+        {
+            "name": "Empty state — no first-paint crash",
+            "category": "Functional", "scene": "empty-crash",
+            "steps": ["Clear cache", "Reload route", "Assert no console error", "Assert empty UI rendered"],
+            "expected_result": "fail",
+            "explanation": "TypeError on first paint when projects=[].",
+        },
+        {
+            "name": "Performance — Largest Contentful Paint < 2.5s on 4G",
+            "category": "Performance", "scene": "image-lcp",
+            "steps": ["Throttle network to 4G", "Cold-load home", "Measure LCP"],
+            "expected_result": "fail",
+            "explanation": "LCP measured at 4.8s. Threshold: 2.5s.",
+        },
+    ]
+    specific = {
+        "finance": [
+            {
+                "name": "Currency math — amounts at $9,999.99 boundary preserve precision",
+                "category": "Functional", "scene": "currency-precision",
+                "steps": ["Enter $9,999.99", "Submit", "Read confirmation total"],
+                "expected_result": "fail",
+                "explanation": "Confirmation shows $10,000.00 — drift of $0.01 violated.",
+            },
+            {
+                "name": "Error UX — surface plain-English message, never error codes",
+                "category": "UX", "scene": "error-jargon",
+                "steps": ["Force 405 from API", "Render error UI", "Read text"],
+                "expected_result": "fail",
+                "explanation": "User sees \"Error #405\" verbatim.",
+            },
+        ],
+        "e-commerce": [
+            {
+                "name": "Checkout — buyer completes in ≤4 clicks from cart",
+                "category": "UX", "scene": "deep-checkout",
+                "steps": ["Open cart", "Tap checkout", "Fill address", "Pay"],
+                "expected_result": "fail",
+                "explanation": "Measured 7 clicks. Threshold: 4.",
+            },
+            {
+                "name": "Coupons — total never goes negative",
+                "category": "Functional", "scene": "empty-crash",
+                "steps": ["Apply 50% code", "Apply second 50% code", "Read total"],
+                "expected_result": "fail",
+                "explanation": "Observed total: -$3.20.",
+            },
+        ],
+        "calendar": [
+            {
+                "name": "Recurrence — weekly event during DST day shows once",
+                "category": "Functional", "scene": "dst-doublebook",
+                "steps": ["Create weekly Mon 9 AM event", "Jump to DST week", "Count occurrences on that day"],
+                "expected_result": "fail",
+                "explanation": "Two occurrences on DST day, expected one.",
+            },
+            {
+                "name": "Event title — long titles truncate cleanly",
+                "category": "Visual", "scene": "calendar-clip",
+                "steps": ["Create 80-char title", "Render in 30-min slot"],
+                "expected_result": "fail",
+                "explanation": "Title bleeds across the next column.",
+            },
+        ],
+        "dashboard": [
+            {
+                "name": "Data grid — filter 10k rows stays interactive (input → render < 200ms)",
+                "category": "Performance", "scene": "grid-freeze",
+                "steps": ["Load 10k rows", "Type into filter", "Measure to next paint"],
+                "expected_result": "fail",
+                "explanation": "Main thread blocked ~6s; UI unresponsive.",
+            },
+            {
+                "name": "Information density — hero metric identifiable in 3 seconds",
+                "category": "UX", "scene": "card-overload",
+                "steps": ["Eye-track new user for 3s", "Ask: what's the most important number?"],
+                "expected_result": "fail",
+                "explanation": "0/5 users identified a single hero metric.",
+            },
         ],
         "generic": [],
     }
@@ -681,6 +1075,39 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
             emitted_issues.append(issue_full)
             await _emit(run_id, seq, "issue", issue_full)
 
+        # Phase 6b — Live test cases: list every case, then play it back step-by-step.
+        await _emit(run_id, seq, "phase", {"phase": "test_cases", "label": "Live Test Case Playback"})
+        cases = _test_cases(app_type)
+        emitted_cases = []
+        for raw in cases:
+            case_id = f"tc_{uuid.uuid4().hex[:8]}"
+            tc = {
+                "id": case_id,
+                "name": raw["name"],
+                "category": raw["category"],
+                "scene": raw["scene"],
+                "steps": raw["steps"],
+                "status": "running",
+                "current_step": 0,
+                "expected_result": raw["expected_result"],
+                "explanation": raw["explanation"],
+            }
+            emitted_cases.append(tc)
+            # Announce the test case
+            await _emit(run_id, seq, "test_case", {**tc, "phase": "start"})
+            # Play each step
+            for idx, step in enumerate(raw["steps"]):
+                await asyncio.sleep(0.45)
+                await _emit(run_id, seq, "test_case_step", {
+                    "case_id": case_id, "step_index": idx, "step": step,
+                    "scene": raw["scene"], "viewport": "Desktop 1440",
+                })
+            await asyncio.sleep(0.4)
+            # Resolve verdict
+            final_status = {"pass": "pass", "warn": "warn", "fail": "fail"}.get(raw["expected_result"], "pass")
+            tc["status"] = final_status
+            await _emit(run_id, seq, "test_case", {**tc, "phase": "end", "explanation": raw["explanation"]})
+
         await _emit(run_id, seq, "phase", {"phase": "benchmark", "label": "Competitive Benchmark"})
         bench_targets = BENCHMARKS.get(app_type, BENCHMARKS["generic"])
         bench_rows = []
@@ -716,6 +1143,7 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
             },
             "personas": personas,
             "issues": emitted_issues,
+            "test_cases": emitted_cases,
             "benchmarks": bench_rows,
             "focus_areas": focus_areas,
             "narrative": narrative,
