@@ -1,0 +1,156 @@
+{
+  "theme_and_archetype": {
+    "domain": "SaaS Web Dashboard & Developer/UX Testing Tool",
+    "theme": "Light",
+    "archetype": "Archetype 4 (Swiss & High-Contrast)",
+    "vibe": "Objective, rigorous, high-end, smooth. The Apple-like aesthetic means crisp whites, deep blacks, high-contrast system colors for status, and structural use of whitespace instead of dividers."
+  },
+  "typography": {
+    "fonts": {
+      "headings": "Outfit",
+      "body": "Manrope",
+      "mono": "JetBrains Mono"
+    },
+    "scales": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tighter font-medium",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight font-medium",
+      "h3": "text-xl sm:text-2xl tracking-tight font-medium",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm text-gray-500",
+      "overline": "text-xs uppercase tracking-[0.2em] font-bold text-gray-400"
+    },
+    "rules": [
+      "DO NOT use Inter, Roboto, Open Sans, or generic fonts for headings.",
+      "Headings must use tight letter spacing (tracking-tight or tracking-tighter).",
+      "Maintain a strong hierarchy: Never jump more than 2 tailwind sizing steps between a heading and its subheading.",
+      "All numeric data (scores, metrics) must use tabular-nums utility for alignment.",
+      "Code blocks or terminal outputs in the real-time monitor must use JetBrains Mono."
+    ]
+  },
+  "color_palette": {
+    "backgrounds": {
+      "page_primary": "#FFFFFF",
+      "page_secondary": "#F5F5F7",
+      "surface_elevated": "#FFFFFF"
+    },
+    "text": {
+      "primary": "#1D1D1F",
+      "secondary": "#86868B",
+      "tertiary": "#A1A1A6",
+      "inverse": "#FFFFFF"
+    },
+    "accents": {
+      "brand_primary": "#0071E3",
+      "brand_hover": "#0077ED",
+      "success": "#34C759",
+      "warning": "#FF9500",
+      "critical": "#FF3B30"
+    },
+    "rules": [
+      "Avoid AI-slop purple/violet gradients entirely.",
+      "Use colors structurally. 95% of the UI should be monochrome (white/grey/black). Use accents strictly for actions, states, and data visualization.",
+      "Never use pure black or pure grey. Tint greys slightly if needed, but #1D1D1F (Apple Dark) is preferred for text.",
+      "Hover states must be explicitly styled (e.g., hover:bg-gray-100) and must maintain contrast."
+    ]
+  },
+  "layout_strategies": {
+    "marketing_landing": {
+      "pattern": "Asymmetric & Generous",
+      "spacing": "py-24 md:py-32 lg:py-40",
+      "rules": "Use large text, floating glass components, and generous whitespace. Avoid standard Bootstrap grids. Introduce overlapping elements for the hero section."
+    },
+    "dashboard_monitoring": {
+      "pattern": "The Control Room Grid",
+      "spacing": "p-4 md:p-6 gap-4 md:gap-6",
+      "rules": "High density, real-time data focus. Use F-pattern scanning. Top-left must be the critical metric. Use a collapsible sidebar. Maximize vertical space for the live activity feed and cinematic video streaming."
+    },
+    "reports_and_personas": {
+      "pattern": "The Bento Grid",
+      "spacing": "p-6 md:p-8 gap-6 md:gap-8",
+      "rules": "Mix shapes and aspect ratios. A large span for the Executive Report chart, smaller squares for Persona scores. Never fill the grid symmetrically; leave breathing room."
+    }
+  },
+  "surface_and_textures": {
+    "glassmorphism": {
+      "usage": "Sticky Navbars, Floating Action Panels, Video Overlays",
+      "classes": "bg-white/70 backdrop-blur-xl backdrop-saturate-150 border border-black/5 shadow-sm"
+    },
+    "dashboard_cards": {
+      "usage": "Metrics, Graphs, Personas, Test Results",
+      "classes": "bg-white rounded-2xl md:rounded-3xl border border-gray-200 shadow-[0_4px_24px_rgba(0,0,0,0.02)] overflow-hidden"
+    },
+    "terminal_panel": {
+      "usage": "Real-time activity feed, CLI logs, root cause analysis blocks",
+      "classes": "bg-[#1D1D1F] text-gray-200 rounded-xl p-4 font-mono text-sm border border-black shadow-inner"
+    }
+  },
+  "component_instructions": {
+    "buttons": "Rounded completely (rounded-full) or Apple-style slightly rounded (rounded-lg). Primary button is Brand Blue with white text. No default Shadcn button styles.",
+    "forms_and_inputs": "Shadcn components heavily customized. Remove harsh focus rings, use subtle blue focus rings (focus:ring-2 focus:ring-[#0071E3]/30).",
+    "tables": "Go borderless on internal rows, use generous padding (py-4). Left-align text, right-align numeric scores.",
+    "charts": "Use Recharts or Shadcn charts. Tooltips must use the Glassmorphism surface strategy. Palettes for charts must be the Success/Warning/Critical colors mapped to UX/Accessibility/Reliability scores.",
+    "icons": "Use lucide-react. Keep stroke-width at 1.5 for a premium, clean look.",
+    "video_player": "Cinematic presentation. Wrap the video evidence in a black container with subtle glass controls overlay. Add a 'LIVE' pulsating red dot indicator for real-time monitoring.",
+    "general": "Do not use raw HTML components for complex interactions (dropdowns, calendars). Use Shadcn primitives but ensure file extensions are .js/.jsx, not .tsx."
+  },
+  "animation_and_motion": {
+    "rules": [
+      "Use Framer Motion for page transitions and staggering bento grid items.",
+      "Micro-interactions: Buttons should scale down slightly on click (active:scale-95).",
+      "Activity Feed: New logs should slide in from the top with a subtle fade.",
+      "Marquee: Use 'react-fast-marquee' for benchmark logos (Google, Stripe, Notion) in a subtle, low-contrast grayscale ribbon."
+    ]
+  },
+  "media_and_images": [
+    {
+      "category": "hero_background_abstract_1",
+      "image_url": "https://images.unsplash.com/photo-1679669693872-12d991fc9d93?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxNzV8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMHdoaXRlJTIwZ2xhc3MlMjByZWZsZWN0aW9ufGVufDB8fHx8MTc4MTk4NDE0NHww&ixlib=rb-4.1.0&q=85",
+      "description": "Abstract white glass reflection - use as a subtle background behind the marketing hero."
+    },
+    {
+      "category": "hero_background_abstract_2",
+      "image_url": "https://images.unsplash.com/photo-1658604663578-04634f4cb897?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxNzV8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMHdoaXRlJTIwZ2xhc3MlMjByZWZsZWN0aW9ufGVufDB8fHx8MTc4MTk4NDE0NHww&ixlib=rb-4.1.0&q=85",
+      "description": "Clean white circular reflection - use in feature sections."
+    },
+    {
+      "category": "hero_background_abstract_3",
+      "image_url": "https://images.unsplash.com/photo-1755502046551-102bcdc6f0c6?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxNzV8MHwxfHNlYXJjaHwzfHxhYnN0cmFjdCUyMHdoaXRlJTIwZ2xhc3MlMjByZWZsZWN0aW9ufGVufDB8fHx8MTc4MTk4NDE0NHww&ixlib=rb-4.1.0&q=85",
+      "description": "Abstract light blue curves - use for background texture in the new test run wizard."
+    },
+    {
+      "category": "dashboard_mockup",
+      "image_url": "https://images.unsplash.com/photo-1551288049-bebda4e38f71?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTF8MHwxfHNlYXJjaHwxfHxkYXNoYm9hcmQlMjB1c2VyJTIwaW50ZXJmYWNlJTIwc2NyZWVufGVufDB8fHx8MTc4MTk4NDE2MXww&ixlib=rb-4.1.0&q=85",
+      "description": "Dashboard user interface on screen - use inside a device mockup in the marketing hero."
+    },
+    {
+      "category": "realtime_code_feed",
+      "image_url": "https://images.pexels.com/photos/9951077/pexels-photo-9951077.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Vibrant green matrix/code stream - use as a visual texture for the root cause analysis or test agent terminal window."
+    },
+    {
+      "category": "benchmark_logo_google",
+      "image_url": "https://images.pexels.com/photos/13628541/pexels-photo-13628541.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Google search page on a screen - use as an environmental representation of the Google benchmark in the benchmark comparison view."
+    },
+    {
+      "category": "benchmark_logo_stripe",
+      "image_url": "https://images.pexels.com/photos/29502370/pexels-photo-29502370.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Stripe app displayed on a mobile device - use as an environmental representation of the Stripe benchmark."
+    },
+    {
+      "category": "benchmark_logo_notion",
+      "image_url": "https://images.unsplash.com/photo-1763929272543-0df093e4f659?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzd8MHwxfHNlYXJjaHwxfHxub3Rpb24lMjBsb2dvJTIwd2hpdGUlMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc4MTk4NDE0NHww&ixlib=rb-4.1.0&q=85",
+      "description": "Abstract organic shape representing Notion - use as a placeholder for the Notion benchmark if vector logo is unavailable."
+    }
+  ],
+  "testing_attributes": {
+    "rule": "All interactive and key informational elements MUST include a data-testid attribute.",
+    "convention": "kebab-case, role-based. Examples: data-testid='run-test-button', data-testid='realtime-feed-panel', data-testid='accessibility-score-value'."
+  },
+  "critical_reminders": [
+    "Do NOT use TypeScript (.tsx), strictly use .js/.jsx for all React components.",
+    "Ensure all Grid children are direct children (if using Framer Motion, motion.div must be the direct child).",
+    "Never use pure transparent backgrounds for headers; always use a backdrop blur or solid fill."
+  ]
+}
