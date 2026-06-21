@@ -10,6 +10,7 @@ import AtmosMark from "@/components/AtmosMark";
 import { TestCaseList, TestCaseTheatre } from "@/components/TestCases";
 import IssueDiffCard from "@/components/IssueDiffCard";
 import RealShot from "@/components/RealShot";
+import AppGraph from "@/components/AppGraph";
 import {
   ArrowUpRight, Eye, FileText, Activity, AlertTriangle, AlertOctagon,
   MousePointerClick, Smartphone, Gauge, Sparkles, GitCompare, Accessibility, Mic, CheckCircle2, FlaskConical,
@@ -144,6 +145,28 @@ export default function RunMonitor() {
   const focusEv = events.find((e) => e.kind === "plan");
   const focusAreas = focusEv?.focus_areas || [];
 
+  // Fold app_graph + page_capture events into a list of discovered pages.
+  const appPages = useMemo(() => {
+    // Start from the latest app_graph event (it has the canonical page list).
+    const graphEv = [...events].reverse().find((e) => e.kind === "app_graph");
+    const base = (graphEv?.pages || []).map((p) => ({
+      url: p.url, title: p.title, slug: p.slug, captures: {},
+    }));
+    const byUrl = new Map(base.map((p) => [p.url, p]));
+    for (const ev of events) {
+      if (ev.kind === "page_capture") {
+        let entry = byUrl.get(ev.url);
+        if (!entry) {
+          entry = { url: ev.url, title: ev.title || "", slug: `page${ev.page_index ?? byUrl.size}`, captures: {} };
+          byUrl.set(ev.url, entry);
+        }
+        entry.captures[ev.viewport] = { ok: ev.ok, url_path: ev.url_path };
+        if (ev.title && !entry.title) entry.title = ev.title;
+      }
+    }
+    return Array.from(byUrl.values());
+  }, [events]);
+
   // Fold test_case + test_case_step events into a stateful map.
   const { testCases, stepIndex, activeRunningId } = useMemo(() => {
     const tcs = new Map();
@@ -163,6 +186,7 @@ export default function RunMonitor() {
 
   const [activeTab, setActiveTab] = useState("live");
   const [selectedCaseId, setSelectedCaseId] = useState(null);
+  const [issuePageFilter, setIssuePageFilter] = useState(null);
 
   // Auto-switch focus: when test_cases phase begins, prefer that tab; auto-select the running case.
   useEffect(() => {
@@ -350,12 +374,42 @@ export default function RunMonitor() {
               />
             </TabsContent>
 
-            {/* ISSUES (diff cards) */}
+            {/* ISSUES (diff cards) — optionally filtered by selected page */}
             <TabsContent value="issues" className="space-y-4 mt-4" data-testid="tab-issues-content">
+              {appPages.length > 1 && (
+                <div className="card-elev p-3 flex items-center gap-2 flex-wrap" data-testid="issue-page-filter">
+                  <span className="text-[10px] uppercase tracking-[0.18em] text-[#86868B] mr-1">Filter by page</span>
+                  <button
+                    type="button"
+                    onClick={() => setIssuePageFilter(null)}
+                    className={`text-xs rounded-full px-3 py-1 ${issuePageFilter === null ? "bg-[#1D1D1F] text-white" : "bg-white border border-black/10"}`}
+                    data-testid="issue-filter-all"
+                  >
+                    All ({issues.length})
+                  </button>
+                  {appPages.map((p) => {
+                    const n = issues.filter((i) => i.page_url === p.url).length;
+                    if (n === 0) return null;
+                    return (
+                      <button
+                        key={p.url}
+                        type="button"
+                        onClick={() => setIssuePageFilter(p.url)}
+                        className={`text-xs rounded-full px-3 py-1 truncate max-w-[260px] ${issuePageFilter === p.url ? "bg-[#1D1D1F] text-white" : "bg-white border border-black/10"}`}
+                        data-testid={`issue-filter-${p.slug}`}
+                      >
+                        {p.title || p.url} <span className="opacity-60 ml-1">({n})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
               {issues.length === 0 ? (
                 <div className="card-elev p-10 text-center text-sm text-[#86868B]">Atmos hasn&apos;t surfaced issues yet — they appear here with before / after diffs.</div>
               ) : (
-                issues.map((iss) => <IssueDiffCard key={iss.id} issue={iss} />)
+                issues
+                  .filter((iss) => !issuePageFilter || iss.page_url === issuePageFilter)
+                  .map((iss) => <IssueDiffCard key={iss.id} issue={iss} />)
               )}
             </TabsContent>
           </Tabs>
@@ -363,6 +417,9 @@ export default function RunMonitor() {
 
         {/* RIGHT */}
         <aside className="lg:col-span-4 space-y-4 md:space-y-6">
+          {/* Application graph */}
+          <AppGraph pages={appPages} onSelect={(url) => { setIssuePageFilter(url); setActiveTab("issues"); }} selectedUrl={issuePageFilter} />
+
           {/* Phases */}
           <div className="card-elev p-5">
             <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-4">Phases</div>

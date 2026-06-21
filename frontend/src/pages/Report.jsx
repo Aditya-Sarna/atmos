@@ -5,6 +5,7 @@ import SiteHeader from "@/components/SiteHeader";
 import { Button } from "@/components/ui/button";
 import AtmosMark from "@/components/AtmosMark";
 import IssueDiffCard from "@/components/IssueDiffCard";
+import AppGraph from "@/components/AppGraph";
 import { TestCaseTheatre, TestCaseList } from "@/components/TestCases";
 import { ArrowLeft, FileText, AlertTriangle, Lightbulb, Sparkles } from "lucide-react";
 
@@ -147,6 +148,17 @@ export default function Report() {
             ))}
           </div>
         </div>
+
+        {/* APPLICATION GRAPH */}
+        {Array.isArray(s.app_graph) && s.app_graph.length > 0 && (
+          <div className="mt-10" data-testid="report-app-graph">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Application graph · pages crawled</div>
+            <h2 className="font-display text-2xl md:text-3xl tracking-tight font-medium mb-5">
+              Atmos analysed {s.app_graph.length} page{s.app_graph.length === 1 ? "" : "s"} across your app.
+            </h2>
+            <AppGraph pages={s.app_graph} />
+          </div>
+        )}
 
         {/* ISSUES with before/after + alternatives */}
         <div className="mt-10 space-y-4" data-testid="report-issues">

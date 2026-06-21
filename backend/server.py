@@ -36,11 +36,11 @@ from starlette.middleware.cors import CORSMiddleware
 from atmos_engine import (
     SCREENSHOTS_DIR,
     VIEWPORTS as REAL_VIEWPORTS,
-    _capture_viewport,
-    _apply_patch_and_capture,
-    _llm_analyze,
-    _deterministic_fallback,
-    _seed_test_cases,
+    crawl_and_capture,
+    apply_patch_full_page,
+    llm_analyze_app,
+    deterministic_fallback,
+    seed_test_cases,
 )
 
 ROOT_DIR = Path(__file__).parent
@@ -1014,7 +1014,8 @@ async def _emit(run_id: str, seq_holder: dict, kind: str, payload: dict[str, Any
 
 
 async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> None:
-    """Real engine: capture → analyze (vision) → patch & re-capture (before/after & alternatives)."""
+    """Real engine: crawl → full-page capture per viewport per page → LLM vision
+    → per-issue patch + re-capture on the issue's page → executive report."""
     seq = {"n": 0}
     app_type = project.get("app_type") or "generic"
     try:
@@ -1027,44 +1028,51 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             )
             try:
-                # ── Phase 1: Analyze (real navigation + capture) ────────
+                # ── Phase 1: Crawl + Capture every reachable page ───────
                 await _emit(run_id, seq, "phase", {"phase": "analyze", "label": "Project Understanding"})
-                await _emit(run_id, seq, "log", {"level": "info", "message": f"Opening {project['url']} in headless Chromium…"})
+                await _emit(run_id, seq, "log", {"level": "info",
+                    "message": f"Launching headless Chromium against {project['url']}…"})
 
-                captures: list[dict[str, Any]] = []
-                for vp in REAL_VIEWPORTS:
-                    cap = await _capture_viewport(browser, project["url"], vp, run_id)
-                    captures.append(cap)
-                    await _emit(run_id, seq, "viewport", {
-                        "viewport": vp["label"], "w": vp["w"], "h": vp["h"],
-                        "status": "ok" if cap.get("ok") else "fail",
-                        "url_path": cap.get("url_path"),
-                    })
-                    if cap.get("ok"):
-                        await _emit(run_id, seq, "screenshot", {
-                            "action": "capture", "target": vp["label"],
-                            "viewport": vp["label"],
-                            "caption": f"Real screenshot · {vp['label']}",
-                            "url_path": cap["url_path"],
+                async def on_progress(ev: dict[str, Any]):
+                    if ev.get("type") == "page_capture":
+                        await _emit(run_id, seq, "page_capture", {
+                            "url": ev["url"],
+                            "viewport": ev["viewport"],
+                            "ok": ev["ok"],
+                            "url_path": ev["url_path"],
+                            "title": ev["title"],
+                            "page_index": ev["page_index"],
                         })
+                        if ev["ok"]:
+                            await _emit(run_id, seq, "screenshot", {
+                                "action": "navigate", "target": ev["url"],
+                                "viewport": ev["viewport"],
+                                "caption": f"{ev['viewport']} · {ev['title'] or ev['url']}",
+                                "url_path": ev["url_path"],
+                            })
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"{'✓' if ev['ok'] else '✗'} {ev['viewport']} · {ev['url']}"})
 
-                successful = [c for c in captures if c.get("ok")]
-                if not successful:
-                    await _emit(run_id, seq, "log", {"level": "error",
-                        "message": "All viewports failed — site may be blocking automated traffic."})
-                    raise RuntimeError("No screenshots captured")
+                await _emit(run_id, seq, "phase", {"phase": "explore", "label": "Crawling Application"})
+                crawl = await crawl_and_capture(browser, project["url"], run_id, on_progress=on_progress)
+                pages = crawl["pages"]
+                if not pages or not any(any(c.get("ok") for c in p["captures"].values()) for p in pages):
+                    raise RuntimeError("No page captures succeeded — site may be blocking automated traffic.")
+
+                await _emit(run_id, seq, "app_graph", {
+                    "pages": [{"url": p["url"], "title": p["title"], "slug": p["slug"]} for p in pages],
+                })
+                await _emit(run_id, seq, "log", {"level": "info",
+                    "message": f"Crawled {len(pages)} page(s). Sending screenshots to Claude vision…"})
 
                 # ── Phase 2: LLM vision analysis ────────────────────────
-                await _emit(run_id, seq, "phase", {"phase": "explore", "label": "Vision Analysis"})
-                await _emit(run_id, seq, "log", {"level": "info", "message": "Asking Claude Sonnet 4.5 (vision) for issues + executed fixes…"})
-
                 try:
-                    analysis = await _llm_analyze(project, command, captures)
+                    analysis = await llm_analyze_app(project, command, pages)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("LLM analyze failed: %s", exc)
                     await _emit(run_id, seq, "log", {"level": "warn",
                         "message": f"Vision LLM unavailable, falling back to heuristics ({type(exc).__name__})."})
-                    analysis = _deterministic_fallback(project)
+                    analysis = deterministic_fallback(project, pages)
 
                 focus_areas = analysis.get("focus_areas", []) or []
                 narrative = analysis.get("narrative", "")
@@ -1084,46 +1092,47 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                 await _emit(run_id, seq, "phase", {"phase": "personas", "label": "Human Persona Simulation"})
                 personas = _persona_scores(app_type)
                 for p in personas:
-                    await asyncio.sleep(0.15)
+                    await asyncio.sleep(0.12)
                     await _emit(run_id, seq, "persona", p)
 
-                # ── Phase 4: Issues — apply each patch live & re-capture
+                # ── Phase 4: Issues — patch & re-capture full pages ─────
                 await _emit(run_id, seq, "phase", {"phase": "issues", "label": "Executed Fixes"})
-                vp_by_label = {vp["label"]: vp for vp in REAL_VIEWPORTS}
+                pages_by_url = {p["url"]: p for p in pages}
+                vp_labels = [v["label"] for v in REAL_VIEWPORTS]
                 emitted_issues: list[dict[str, Any]] = []
+
                 for raw in analysis.get("issues", [])[:8]:
-                    vp_label = raw.get("viewport_label") or "Desktop 1440"
-                    vp = vp_by_label.get(vp_label) or vp_by_label["Desktop 1440"]
-                    vp_label = vp["label"]
+                    page_url = raw.get("page_url") or pages[0]["url"]
+                    target_page = pages_by_url.get(page_url) or pages[0]
+                    vp_label = raw.get("viewport_label") if raw.get("viewport_label") in vp_labels else "Desktop 1440"
+
+                    # baseline already captured during crawl
+                    before_cap = target_page["captures"].get(vp_label) or next(
+                        (c for c in target_page["captures"].values() if c.get("ok")), {}
+                    )
+                    before_url = before_cap.get("url_path")
 
                     iss_id = f"iss_{uuid.uuid4().hex[:8]}"
-
-                    # find the baseline capture we already have
-                    before_path = next(
-                        (c["url_path"] for c in captures if c.get("ok") and c["viewport"] == vp_label),
-                        successful[0]["url_path"],
-                    )
-
                     await _emit(run_id, seq, "log", {"level": "info",
-                        "message": f"Applying patch for {raw.get('title', 'issue')} on {vp_label}…"})
+                        "message": f"Applying patch for ‘{raw.get('title', 'issue')}’ on {target_page['url']} ({vp_label})…"})
 
-                    after_path = await _apply_patch_and_capture(
-                        browser, project["url"], vp, raw.get("patch_css", ""),
-                        f"{iss_id}_after", run_id,
+                    after_url = await apply_patch_full_page(
+                        browser, target_page["url"], vp_label,
+                        raw.get("patch_css", ""), run_id, f"{iss_id}_after", target_page["slug"],
                     )
 
                     alts_out = []
                     for ai, alt in enumerate((raw.get("alternatives") or [])[:2]):
-                        alt_path = await _apply_patch_and_capture(
-                            browser, project["url"], vp, alt.get("patch_css", ""),
-                            f"{iss_id}_alt{ai}", run_id,
+                        alt_url = await apply_patch_full_page(
+                            browser, target_page["url"], vp_label,
+                            alt.get("patch_css", ""), run_id, f"{iss_id}_alt{ai}", target_page["slug"],
                         )
                         alts_out.append({
                             "label": alt.get("label", f"Alternative {ai+1}"),
                             "summary": alt.get("summary", ""),
                             "tradeoff": alt.get("tradeoff", ""),
                             "patch_css": alt.get("patch_css", ""),
-                            "screenshot_url": alt_path,
+                            "screenshot_url": alt_url,
                         })
 
                     issue_full = {
@@ -1132,27 +1141,28 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                         "severity": raw.get("severity", "medium"),
                         "title": raw.get("title", "Untitled issue"),
                         "cause": raw.get("cause", ""),
+                        "page_url": target_page["url"],
+                        "page_title": target_page.get("title", ""),
                         "viewport": vp_label,
-                        "viewport_w": vp["w"], "viewport_h": vp["h"],
                         "before": {
                             "headline": raw.get("title", ""),
                             "detail": raw.get("cause", ""),
-                            "screenshot_url": before_path,
+                            "screenshot_url": before_url,
                         },
                         "after": {
                             "headline": "Atmos applied this fix",
                             "detail": raw.get("patch_explanation", ""),
                             "code": raw.get("patch_css", ""),
-                            "screenshot_url": after_path,
+                            "screenshot_url": after_url,
                         },
                         "alternatives": alts_out,
                     }
                     emitted_issues.append(issue_full)
                     await _emit(run_id, seq, "issue", issue_full)
 
-                # ── Phase 5: Live test cases (real, using captured frames)
+                # ── Phase 5: Live test cases ────────────────────────────
                 await _emit(run_id, seq, "phase", {"phase": "test_cases", "label": "Live Test Case Playback"})
-                cases = _seed_test_cases(app_type, captures)
+                cases = seed_test_cases(app_type, pages)
                 emitted_cases = []
                 for raw in cases:
                     case_id = f"tc_{uuid.uuid4().hex[:8]}"
@@ -1170,22 +1180,22 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                     emitted_cases.append(tc)
                     await _emit(run_id, seq, "test_case", {**tc, "phase": "start"})
                     for idx, step in enumerate(raw["steps"]):
-                        await asyncio.sleep(0.4)
+                        await asyncio.sleep(0.35)
+                        frame = (raw.get("frames") or [None])[min(idx, len(raw.get("frames") or []) - 1)] if raw.get("frames") else None
                         await _emit(run_id, seq, "test_case_step", {
                             "case_id": case_id, "step_index": idx, "step": step,
                             "viewport": "Desktop 1440",
-                            "frame": (raw.get("frames") or [None])[min(idx, len(raw.get("frames") or []) - 1)] if raw.get("frames") else None,
+                            "frame": frame,
                         })
-                    final_status = raw["expected_result"]
-                    tc["status"] = final_status
+                    tc["status"] = raw["expected_result"]
                     await _emit(run_id, seq, "test_case", {**tc, "phase": "end", "explanation": raw["explanation"]})
 
-                # ── Phase 6: Benchmark + Report
+                # ── Phase 6: Benchmark + Report ─────────────────────────
                 await _emit(run_id, seq, "phase", {"phase": "benchmark", "label": "Competitive Benchmark"})
                 bench_targets = BENCHMARKS.get(app_type, BENCHMARKS["generic"])
                 bench_rows = []
                 for b in bench_targets:
-                    await asyncio.sleep(0.15)
+                    await asyncio.sleep(0.12)
                     row = {
                         "competitor": b,
                         "clicks_to_primary": random.randint(2, 4),
@@ -1220,7 +1230,11 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                     "benchmarks": bench_rows,
                     "focus_areas": focus_areas,
                     "narrative": narrative,
-                    "captures": captures,
+                    "app_graph": [
+                        {"url": p["url"], "title": p["title"], "slug": p["slug"],
+                         "captures": {k: {"ok": v.get("ok"), "url_path": v.get("url_path")} for k, v in p["captures"].items()}}
+                        for p in pages
+                    ],
                     **report,
                 }
                 await db.test_runs.update_one(

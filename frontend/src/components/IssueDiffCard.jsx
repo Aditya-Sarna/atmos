@@ -33,6 +33,11 @@ export default function IssueDiffCard({ issue }) {
             )}
           </div>
           <div className="font-display text-xl md:text-2xl font-medium mt-1 leading-snug">{issue.title}</div>
+          {issue.page_url && (
+            <div className="font-mono text-xs text-[#0071E3] mt-1 truncate" data-testid={`issue-page-url-${issue.id}`}>
+              {issue.page_title ? `${issue.page_title} · ` : ""}{issue.page_url}
+            </div>
+          )}
           {issue.file && (
             <div className="font-mono text-xs text-[#86868B] mt-1 flex items-center gap-1.5">
               <FileCode2 className="h-3.5 w-3.5" strokeWidth={1.5} /> {issue.file}
