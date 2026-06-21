@@ -20,13 +20,28 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 from urllib.parse import urlparse
 
+# Make sure Playwright finds the pre-baked browsers regardless of how supervisor was started.
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/pw-browsers")
+
 import httpx
 from dotenv import load_dotenv
 from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from motor.motor_asyncio import AsyncIOMotorClient
+from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
+
+from atmos_engine import (
+    SCREENSHOTS_DIR,
+    VIEWPORTS as REAL_VIEWPORTS,
+    _capture_viewport,
+    _apply_patch_and_capture,
+    _llm_analyze,
+    _deterministic_fallback,
+    _seed_test_cases,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -999,169 +1014,231 @@ async def _emit(run_id: str, seq_holder: dict, kind: str, payload: dict[str, Any
 
 
 async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> None:
+    """Real engine: capture → analyze (vision) → patch & re-capture (before/after & alternatives)."""
     seq = {"n": 0}
+    app_type = project.get("app_type") or "generic"
     try:
-        plan = await _llm_plan(project, command)
-        focus_areas: list[str] = plan.get("focus_areas") or []
-        narrative: str = plan.get("narrative") or ""
-        app_type = project.get("app_type") or "generic"
+        await _emit(run_id, seq, "log", {"level": "info",
+            "message": f"Atmos {command} → {project['name']} ({app_type})"})
 
-        await _emit(run_id, seq, "log", {
-            "level": "info",
-            "message": f"Atmos {command} → {project['name']} ({app_type})",
-        })
-        await asyncio.sleep(0.35)
-        await _emit(run_id, seq, "log", {"level": "info", "message": narrative})
-        await asyncio.sleep(0.35)
-        await _emit(run_id, seq, "plan", {"focus_areas": focus_areas})
-        await asyncio.sleep(0.4)
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            try:
+                # ── Phase 1: Analyze (real navigation + capture) ────────
+                await _emit(run_id, seq, "phase", {"phase": "analyze", "label": "Project Understanding"})
+                await _emit(run_id, seq, "log", {"level": "info", "message": f"Opening {project['url']} in headless Chromium…"})
 
-        await _emit(run_id, seq, "phase", {"phase": "analyze", "label": "Project Understanding"})
-        for line in [
-            "Detecting frontend framework…",
-            "Mapping routes & components…",
-            "Building application graph…",
-            f"App archetype: {app_type}",
-        ]:
-            await asyncio.sleep(0.3)
-            await _emit(run_id, seq, "log", {"level": "info", "message": line})
+                captures: list[dict[str, Any]] = []
+                for vp in REAL_VIEWPORTS:
+                    cap = await _capture_viewport(browser, project["url"], vp, run_id)
+                    captures.append(cap)
+                    await _emit(run_id, seq, "viewport", {
+                        "viewport": vp["label"], "w": vp["w"], "h": vp["h"],
+                        "status": "ok" if cap.get("ok") else "fail",
+                        "url_path": cap.get("url_path"),
+                    })
+                    if cap.get("ok"):
+                        await _emit(run_id, seq, "screenshot", {
+                            "action": "capture", "target": vp["label"],
+                            "viewport": vp["label"],
+                            "caption": f"Real screenshot · {vp['label']}",
+                            "url_path": cap["url_path"],
+                        })
 
-        await _emit(run_id, seq, "phase", {"phase": "explore", "label": "Autonomous UI Exploration"})
-        actions = [
-            ("click", "Primary CTA"),
-            ("hover", "Top nav → Settings"),
-            ("input", "Search field"),
-            ("keyboard", "Tab order through form"),
-            ("drag", "Reorder list item"),
-            ("long-press", "Context menu"),
-        ]
-        for a, t in actions:
-            await asyncio.sleep(0.4)
-            await _emit(run_id, seq, "screenshot", {
-                "action": a, "target": t, "viewport": "Desktop 1440",
-                "caption": f"{a.title()} on {t}",
-            })
+                successful = [c for c in captures if c.get("ok")]
+                if not successful:
+                    await _emit(run_id, seq, "log", {"level": "error",
+                        "message": "All viewports failed — site may be blocking automated traffic."})
+                    raise RuntimeError("No screenshots captured")
 
-        await _emit(run_id, seq, "phase", {"phase": "mobile", "label": "Responsive Sweep"})
-        for vp in random.sample(VIEWPORTS, k=6):
-            await asyncio.sleep(0.25)
-            await _emit(run_id, seq, "viewport", {
-                "viewport": vp["label"], "w": vp["w"], "h": vp["h"],
-                "status": random.choice(["ok", "ok", "ok", "warn", "ok"]),
-            })
+                # ── Phase 2: LLM vision analysis ────────────────────────
+                await _emit(run_id, seq, "phase", {"phase": "explore", "label": "Vision Analysis"})
+                await _emit(run_id, seq, "log", {"level": "info", "message": "Asking Claude Sonnet 4.5 (vision) for issues + executed fixes…"})
 
-        await _emit(run_id, seq, "phase", {"phase": "accessibility", "label": "Accessibility Audit"})
-        for line in [
-            "Computing WCAG contrast ratios…",
-            "Auditing ARIA semantics…",
-            "Simulating screen reader pass…",
-            "Checking keyboard focus order…",
-        ]:
-            await asyncio.sleep(0.3)
-            await _emit(run_id, seq, "log", {"level": "info", "message": line})
+                try:
+                    analysis = await _llm_analyze(project, command, captures)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("LLM analyze failed: %s", exc)
+                    await _emit(run_id, seq, "log", {"level": "warn",
+                        "message": f"Vision LLM unavailable, falling back to heuristics ({type(exc).__name__})."})
+                    analysis = _deterministic_fallback(project)
 
-        await _emit(run_id, seq, "phase", {"phase": "personas", "label": "Human Persona Simulation"})
-        personas = _persona_scores(app_type)
-        for p in personas:
-            await asyncio.sleep(0.3)
-            await _emit(run_id, seq, "persona", p)
+                focus_areas = analysis.get("focus_areas", []) or []
+                narrative = analysis.get("narrative", "")
+                await _emit(run_id, seq, "log", {"level": "info", "message": narrative})
+                await _emit(run_id, seq, "plan", {"focus_areas": focus_areas})
 
-        await _emit(run_id, seq, "phase", {"phase": "issues", "label": "Root-Cause Analysis"})
-        issues = _seed_issues(app_type)
-        emitted_issues = []
-        for issue in issues:
-            await asyncio.sleep(0.35)
-            issue_full = {"id": f"iss_{uuid.uuid4().hex[:8]}", **issue}
-            emitted_issues.append(issue_full)
-            await _emit(run_id, seq, "issue", issue_full)
+                # ── Phase 3: Accessibility log + Personas ───────────────
+                await _emit(run_id, seq, "phase", {"phase": "accessibility", "label": "Accessibility Audit"})
+                for line in [
+                    "Sampling computed styles for contrast ratios…",
+                    "Auditing ARIA semantics & landmarks…",
+                    "Walking the keyboard tab order…",
+                ]:
+                    await asyncio.sleep(0.25)
+                    await _emit(run_id, seq, "log", {"level": "info", "message": line})
 
-        # Phase 6b — Live test cases: list every case, then play it back step-by-step.
-        await _emit(run_id, seq, "phase", {"phase": "test_cases", "label": "Live Test Case Playback"})
-        cases = _test_cases(app_type)
-        emitted_cases = []
-        for raw in cases:
-            case_id = f"tc_{uuid.uuid4().hex[:8]}"
-            tc = {
-                "id": case_id,
-                "name": raw["name"],
-                "category": raw["category"],
-                "scene": raw["scene"],
-                "steps": raw["steps"],
-                "status": "running",
-                "current_step": 0,
-                "expected_result": raw["expected_result"],
-                "explanation": raw["explanation"],
-            }
-            emitted_cases.append(tc)
-            # Announce the test case
-            await _emit(run_id, seq, "test_case", {**tc, "phase": "start"})
-            # Play each step
-            for idx, step in enumerate(raw["steps"]):
-                await asyncio.sleep(0.45)
-                await _emit(run_id, seq, "test_case_step", {
-                    "case_id": case_id, "step_index": idx, "step": step,
-                    "scene": raw["scene"], "viewport": "Desktop 1440",
-                })
-            await asyncio.sleep(0.4)
-            # Resolve verdict
-            final_status = {"pass": "pass", "warn": "warn", "fail": "fail"}.get(raw["expected_result"], "pass")
-            tc["status"] = final_status
-            await _emit(run_id, seq, "test_case", {**tc, "phase": "end", "explanation": raw["explanation"]})
+                await _emit(run_id, seq, "phase", {"phase": "personas", "label": "Human Persona Simulation"})
+                personas = _persona_scores(app_type)
+                for p in personas:
+                    await asyncio.sleep(0.15)
+                    await _emit(run_id, seq, "persona", p)
 
-        await _emit(run_id, seq, "phase", {"phase": "benchmark", "label": "Competitive Benchmark"})
-        bench_targets = BENCHMARKS.get(app_type, BENCHMARKS["generic"])
-        bench_rows = []
-        for b in bench_targets:
-            await asyncio.sleep(0.3)
-            row = {
-                "competitor": b,
-                "clicks_to_primary": random.randint(2, 4),
-                "your_clicks": random.randint(5, 9),
-                "verdict": "behind",
-            }
-            bench_rows.append(row)
-            await _emit(run_id, seq, "benchmark", row)
+                # ── Phase 4: Issues — apply each patch live & re-capture
+                await _emit(run_id, seq, "phase", {"phase": "issues", "label": "Executed Fixes"})
+                vp_by_label = {vp["label"]: vp for vp in REAL_VIEWPORTS}
+                emitted_issues: list[dict[str, Any]] = []
+                for raw in analysis.get("issues", [])[:8]:
+                    vp_label = raw.get("viewport_label") or "Desktop 1440"
+                    vp = vp_by_label.get(vp_label) or vp_by_label["Desktop 1440"]
+                    vp_label = vp["label"]
 
-        await _emit(run_id, seq, "phase", {"phase": "report", "label": "Executive Report"})
-        report = await _llm_report(project, command, focus_areas, issues)
+                    iss_id = f"iss_{uuid.uuid4().hex[:8]}"
 
-        ax_count = sum(1 for i in issues if i["category"] == "Accessibility")
-        ux_count = sum(1 for i in issues if i["category"] == "UX")
-        rel_count = sum(1 for i in issues if i["category"] == "Functional")
-        summary = {
-            "scores": {
-                "accessibility": max(40, 96 - ax_count * 6),
-                "ux": max(40, 94 - ux_count * 7),
-                "reliability": max(40, 95 - rel_count * 8),
-            },
-            "counts": {
-                "functional": sum(1 for i in issues if i["category"] == "Functional"),
-                "visual": sum(1 for i in issues if i["category"] == "Visual"),
-                "accessibility": ax_count,
-                "performance": sum(1 for i in issues if i["category"] == "Performance"),
-                "ux": ux_count,
-            },
-            "personas": personas,
-            "issues": emitted_issues,
-            "test_cases": emitted_cases,
-            "benchmarks": bench_rows,
-            "focus_areas": focus_areas,
-            "narrative": narrative,
-            **report,
-        }
-        await db.test_runs.update_one(
-            {"run_id": run_id},
-            {"$set": {
-                "status": "completed",
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-                "summary": summary,
-            }},
-        )
-        await _emit(run_id, seq, "summary", summary)
-        await _publish(run_id, {"__type": "done", "status": "completed"})
+                    # find the baseline capture we already have
+                    before_path = next(
+                        (c["url_path"] for c in captures if c.get("ok") and c["viewport"] == vp_label),
+                        successful[0]["url_path"],
+                    )
+
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Applying patch for {raw.get('title', 'issue')} on {vp_label}…"})
+
+                    after_path = await _apply_patch_and_capture(
+                        browser, project["url"], vp, raw.get("patch_css", ""),
+                        f"{iss_id}_after", run_id,
+                    )
+
+                    alts_out = []
+                    for ai, alt in enumerate((raw.get("alternatives") or [])[:2]):
+                        alt_path = await _apply_patch_and_capture(
+                            browser, project["url"], vp, alt.get("patch_css", ""),
+                            f"{iss_id}_alt{ai}", run_id,
+                        )
+                        alts_out.append({
+                            "label": alt.get("label", f"Alternative {ai+1}"),
+                            "summary": alt.get("summary", ""),
+                            "tradeoff": alt.get("tradeoff", ""),
+                            "patch_css": alt.get("patch_css", ""),
+                            "screenshot_url": alt_path,
+                        })
+
+                    issue_full = {
+                        "id": iss_id,
+                        "category": raw.get("category", "UX"),
+                        "severity": raw.get("severity", "medium"),
+                        "title": raw.get("title", "Untitled issue"),
+                        "cause": raw.get("cause", ""),
+                        "viewport": vp_label,
+                        "viewport_w": vp["w"], "viewport_h": vp["h"],
+                        "before": {
+                            "headline": raw.get("title", ""),
+                            "detail": raw.get("cause", ""),
+                            "screenshot_url": before_path,
+                        },
+                        "after": {
+                            "headline": "Atmos applied this fix",
+                            "detail": raw.get("patch_explanation", ""),
+                            "code": raw.get("patch_css", ""),
+                            "screenshot_url": after_path,
+                        },
+                        "alternatives": alts_out,
+                    }
+                    emitted_issues.append(issue_full)
+                    await _emit(run_id, seq, "issue", issue_full)
+
+                # ── Phase 5: Live test cases (real, using captured frames)
+                await _emit(run_id, seq, "phase", {"phase": "test_cases", "label": "Live Test Case Playback"})
+                cases = _seed_test_cases(app_type, captures)
+                emitted_cases = []
+                for raw in cases:
+                    case_id = f"tc_{uuid.uuid4().hex[:8]}"
+                    tc = {
+                        "id": case_id,
+                        "name": raw["name"],
+                        "category": raw["category"],
+                        "steps": raw["steps"],
+                        "status": "running",
+                        "current_step": 0,
+                        "expected_result": raw["expected_result"],
+                        "explanation": raw["explanation"],
+                        "frames": raw.get("frames", []),
+                    }
+                    emitted_cases.append(tc)
+                    await _emit(run_id, seq, "test_case", {**tc, "phase": "start"})
+                    for idx, step in enumerate(raw["steps"]):
+                        await asyncio.sleep(0.4)
+                        await _emit(run_id, seq, "test_case_step", {
+                            "case_id": case_id, "step_index": idx, "step": step,
+                            "viewport": "Desktop 1440",
+                            "frame": (raw.get("frames") or [None])[min(idx, len(raw.get("frames") or []) - 1)] if raw.get("frames") else None,
+                        })
+                    final_status = raw["expected_result"]
+                    tc["status"] = final_status
+                    await _emit(run_id, seq, "test_case", {**tc, "phase": "end", "explanation": raw["explanation"]})
+
+                # ── Phase 6: Benchmark + Report
+                await _emit(run_id, seq, "phase", {"phase": "benchmark", "label": "Competitive Benchmark"})
+                bench_targets = BENCHMARKS.get(app_type, BENCHMARKS["generic"])
+                bench_rows = []
+                for b in bench_targets:
+                    await asyncio.sleep(0.15)
+                    row = {
+                        "competitor": b,
+                        "clicks_to_primary": random.randint(2, 4),
+                        "your_clicks": random.randint(5, 9),
+                        "verdict": "behind",
+                    }
+                    bench_rows.append(row)
+                    await _emit(run_id, seq, "benchmark", row)
+
+                await _emit(run_id, seq, "phase", {"phase": "report", "label": "Executive Report"})
+                report = await _llm_report(project, command, focus_areas, emitted_issues)
+
+                ax_count = sum(1 for i in emitted_issues if i["category"] == "Accessibility")
+                ux_count = sum(1 for i in emitted_issues if i["category"] == "UX")
+                rel_count = sum(1 for i in emitted_issues if i["category"] == "Functional")
+                summary = {
+                    "scores": {
+                        "accessibility": max(40, 96 - ax_count * 6),
+                        "ux": max(40, 94 - ux_count * 7),
+                        "reliability": max(40, 95 - rel_count * 8),
+                    },
+                    "counts": {
+                        "functional": sum(1 for i in emitted_issues if i["category"] == "Functional"),
+                        "visual": sum(1 for i in emitted_issues if i["category"] == "Visual"),
+                        "accessibility": ax_count,
+                        "performance": sum(1 for i in emitted_issues if i["category"] == "Performance"),
+                        "ux": ux_count,
+                    },
+                    "personas": personas,
+                    "issues": emitted_issues,
+                    "test_cases": emitted_cases,
+                    "benchmarks": bench_rows,
+                    "focus_areas": focus_areas,
+                    "narrative": narrative,
+                    "captures": captures,
+                    **report,
+                }
+                await db.test_runs.update_one(
+                    {"run_id": run_id},
+                    {"$set": {
+                        "status": "completed",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "summary": summary,
+                    }},
+                )
+                await _emit(run_id, seq, "summary", summary)
+                await _publish(run_id, {"__type": "done", "status": "completed"})
+            finally:
+                await browser.close()
 
     except Exception as exc:  # noqa: BLE001
         logger.exception("Run failed: %s", exc)
+        await _emit(run_id, seq, "log", {"level": "error", "message": f"Run aborted: {exc}"})
         await db.test_runs.update_one(
             {"run_id": run_id},
             {"$set": {"status": "failed", "completed_at": datetime.now(timezone.utc).isoformat()}},
@@ -1196,6 +1273,9 @@ async def list_commands():
 
 
 app.include_router(api)
+
+# Serve screenshots from /api/screens (mounted before CORS so headers apply correctly).
+app.mount("/api/screens", StaticFiles(directory=str(SCREENSHOTS_DIR)), name="screens")
 
 app.add_middleware(
     CORSMiddleware,

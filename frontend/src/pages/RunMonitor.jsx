@@ -9,6 +9,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import AtmosMark from "@/components/AtmosMark";
 import { TestCaseList, TestCaseTheatre } from "@/components/TestCases";
 import IssueDiffCard from "@/components/IssueDiffCard";
+import RealShot from "@/components/RealShot";
 import {
   ArrowUpRight, Eye, FileText, Activity, AlertTriangle, AlertOctagon,
   MousePointerClick, Smartphone, Gauge, Sparkles, GitCompare, Accessibility, Mic, CheckCircle2, FlaskConical,
@@ -261,25 +262,43 @@ export default function RunMonitor() {
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2 text-xs text-[#86868B] uppercase tracking-[0.2em]">
                     <span className="w-1.5 h-1.5 rounded-full bg-[#FF3B30] live-dot" />
-                    Cinematic capture
+                    Cinematic capture · your app
                   </div>
                   {currentPhase && (
                     <div className="text-xs text-[#86868B]">{currentPhase.label}</div>
                   )}
                 </div>
-                <MockBrowser
-                  url={project?.url}
-                  action={latestShot?.action}
-                  target={latestShot?.target}
-                  viewport={latestShot?.viewport}
-                />
+                {latestShot?.url_path ? (
+                  <RealShot
+                    urlPath={latestShot.url_path}
+                    label={`${latestShot.viewport} · ${project?.url}`}
+                    badge="captured"
+                    testid="cinematic-real-shot"
+                  />
+                ) : (
+                  <MockBrowser
+                    url={project?.url}
+                    action={latestShot?.action}
+                    target={latestShot?.target}
+                    viewport={latestShot?.viewport}
+                  />
+                )}
                 {screenshots.length > 0 && (
-                  <div className="mt-4 grid grid-cols-6 gap-2">
-                    {screenshots.slice(-6).map((s) => (
-                      <div key={s.seq} className="rounded-md aspect-video bg-gradient-to-br from-[#F5F5F7] to-white border border-black/5 relative overflow-hidden">
-                        <div className="absolute inset-0 dot-grid opacity-50" />
-                        <div className="absolute bottom-1 left-1 right-1 text-[9px] font-mono text-[#1D1D1F]/70 truncate">{s.action} {s.target}</div>
-                      </div>
+                  <div className="mt-4 grid grid-cols-4 gap-2">
+                    {screenshots.slice(-4).map((s) => (
+                      s.url_path ? (
+                        <RealShot
+                          key={s.seq}
+                          urlPath={s.url_path}
+                          label={s.viewport}
+                          aspect="4/3"
+                        />
+                      ) : (
+                        <div key={s.seq} className="rounded-md aspect-video bg-gradient-to-br from-[#F5F5F7] to-white border border-black/5 relative overflow-hidden">
+                          <div className="absolute inset-0 dot-grid opacity-50" />
+                          <div className="absolute bottom-1 left-1 right-1 text-[9px] font-mono text-[#1D1D1F]/70 truncate">{s.action} {s.target}</div>
+                        </div>
+                      )
                     ))}
                   </div>
                 )}

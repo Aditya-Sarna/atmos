@@ -1,4 +1,5 @@
 import { ScenePlayer } from "@/components/Scene";
+import RealShot from "@/components/RealShot";
 import { CheckCircle2, AlertTriangle, AlertOctagon, Clock } from "lucide-react";
 
 const STATUS_META = {
@@ -77,12 +78,23 @@ export function TestCaseTheatre({ testCase, currentStep }) {
         </span>
       </div>
 
-      <ScenePlayer
-        scene={testCase.scene}
-        steps={testCase.steps || []}
-        currentStep={currentStep}
-        status={testCase.status}
-      />
+      {testCase.frames && testCase.frames.length > 0 ? (
+        <RealShot
+          urlPath={testCase.frames[Math.min(Math.max(0, currentStep), testCase.frames.length - 1)]}
+          label={`step ${Math.min(currentStep + 1, (testCase.steps || []).length)}/${(testCase.steps || []).length}`}
+          badge={testCase.status === "running" ? "rec · live" : meta.label.toLowerCase()}
+          tone={testCase.status === "pass" ? "ok" : testCase.status === "fail" ? "broken" : testCase.status === "warn" ? "warn" : "ok"}
+        />
+      ) : testCase.scene ? (
+        <ScenePlayer
+          scene={testCase.scene}
+          steps={testCase.steps || []}
+          currentStep={currentStep}
+          status={testCase.status}
+        />
+      ) : (
+        <RealShot urlPath={null} label="No frames captured" badge="unavailable" tone="warn" />
+      )}
 
       <ol className="mt-5 space-y-2">
         {(testCase.steps || []).map((s, i) => {
