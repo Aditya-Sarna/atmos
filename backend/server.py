@@ -35,6 +35,29 @@ from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
+def _ensure_playwright_browsers() -> None:
+    """Auto-install chromium if the binary expected by the current Playwright is missing."""
+    import logging as _logging
+    import subprocess
+    _log = _logging.getLogger("atmos.playwright_bootstrap")
+
+    browsers_dir = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/pw-browsers"))
+    candidate_dirs = list(browsers_dir.glob("chromium_headless_shell-*")) + list(browsers_dir.glob("chromium-*"))
+    has_binary = any((d / "chrome-linux" / "headless_shell").exists() for d in candidate_dirs)
+    if has_binary:
+        return
+    _log.warning("Playwright chromium binary missing under %s; running `playwright install chromium`…", browsers_dir)
+    try:
+        env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(browsers_dir)}
+        subprocess.run(["playwright", "install", "chromium"], check=True, env=env, timeout=300)
+        _log.info("Playwright chromium installed.")
+    except Exception as exc:  # noqa: BLE001
+        _log.error("Could not auto-install Playwright chromium: %s", exc)
+
+
+_ensure_playwright_browsers()
+
+
 from atmos_engine import (
     SCREENSHOTS_DIR,
     VIDEOS_DIR,
@@ -1729,6 +1752,189 @@ def _find_arch_suggestion(summary: dict[str, Any], suggestion_id: str) -> Option
 # ────────────────────────────────────────────────────────────────────────
 
 from swarm_api import SwarmConfigBody, SwarmResultsResponse, ShipReportResponse
+
+
+class SwarmStartBody(BaseModel):
+    target_users: int = 50            # 10/50/100/250/500/1000
+    profile: str = "burst"            # burst | ramp | soak
+    journey: str = "generic"          # generic | ecommerce | finance | saas
+    duration_secs: int = 30
+
+
+@api.post("/runs/{run_id}/swarm/start")
+async def start_swarm(run_id: str, body: SwarmStartBody, user: User = Depends(current_user)):
+    """Kick off a real Playwright user swarm against the project's target URL.
+
+    Spawns N concurrent virtual users that walk a journey on the live site, then
+    persists the aggregated metrics (success rate, p95 latency, breaking point,
+    revenue risk) on the run document for the Swarm tab to render.
+    """
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    project = await db.projects.find_one({"project_id": run["project_id"]}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    target_users = max(1, min(int(body.target_users), 500))
+    duration = max(5, min(int(body.duration_secs), 120))
+
+    await db.test_runs.update_one(
+        {"run_id": run_id},
+        {"$set": {"swarm_summary": {"status": "running", "started_at": datetime.now(timezone.utc).isoformat(),
+                                    "target_users": target_users, "profile": body.profile,
+                                    "journey": body.journey, "duration_secs": duration}}},
+    )
+
+    async def _go():
+        from load_simulator import LoadSimulator
+        from dataclasses import asdict
+
+        async def emit(kind: str, payload: dict):
+            payload = dict(payload or {})
+            payload["run_id"] = run_id
+            payload["ts"] = datetime.now(timezone.utc).isoformat()
+            payload["kind"] = "swarm_event"
+            payload["event"] = kind
+            await db.run_events.insert_one(dict(payload))
+            await _publish(run_id, {k: v for k, v in payload.items() if k != "_id"})
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+                try:
+                    sim = LoadSimulator(
+                        browser=browser, base_url=project["url"], run_id=run_id,
+                        event_emitter=lambda payload: asyncio.create_task(emit(payload.get("kind", "swarm"), payload)) if isinstance(payload, dict) else None,
+                    )
+                    await emit("swarm_started", {"target_users": target_users, "profile": body.profile, "journey": body.journey})
+                    metrics = await sim.run_burst_test(
+                        target_users=target_users,
+                        journey_template=body.journey,
+                        duration_secs=duration,
+                    )
+                    md = asdict(metrics) if hasattr(metrics, "__dataclass_fields__") else dict(metrics)
+                    md["status"] = "completed"
+                    md["completed_at"] = datetime.now(timezone.utc).isoformat()
+                    md["profile"] = body.profile
+                    md["journey"] = body.journey
+                    md["target_users"] = target_users
+                    await db.test_runs.update_one({"run_id": run_id}, {"$set": {"swarm_summary": md}})
+                    await emit("swarm_completed", md)
+                finally:
+                    await browser.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Swarm failed: %s", exc)
+            await db.test_runs.update_one({"run_id": run_id},
+                {"$set": {"swarm_summary": {"status": "failed", "error": str(exc)[:300]}}})
+            await emit("swarm_failed", {"error": str(exc)[:300]})
+
+    asyncio.create_task(_go())
+    return {"status": "started", "target_users": target_users}
+
+
+# ============================================================================
+# Payment sandbox — finance app testing
+# ============================================================================
+
+
+class PaymentSimulateBody(BaseModel):
+    provider: str = "stripe"           # stripe | razorpay | paypal
+    concurrent: int = 25               # how many parallel payment attempts
+    outcomes: list[str] = ["success", "decline_insufficient_funds", "fraud", "3ds_required"]
+    amount_cents: int = 4999
+
+
+@api.post("/runs/{run_id}/payment/simulate")
+async def simulate_payments(run_id: str, body: PaymentSimulateBody, user: User = Depends(current_user)):
+    """Generate test payment payloads + simulate concurrent processing.
+
+    Uses TestPaymentGenerator to produce provider-specific test card numbers
+    and PaymentSandbox to run them through a (mocked at first, real later)
+    settlement path. Emits per-attempt events; returns aggregate metrics.
+    """
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    from payment_sandbox import (
+        TestPaymentGenerator, PaymentProvider, PaymentOutcome,
+    )
+    try:
+        provider = PaymentProvider(body.provider.lower())
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {body.provider}")
+
+    gen = TestPaymentGenerator(provider)
+    requested = max(1, min(body.concurrent, 200))
+    outcomes_pool = [o for o in body.outcomes if o in [e.value for e in PaymentOutcome]] or ["success"]
+
+    async def _run_one(idx: int) -> dict:
+        outcome_name = outcomes_pool[idx % len(outcomes_pool)]
+        outcome = PaymentOutcome(outcome_name)
+        req = gen.generate_test_payment_request(outcome=outcome, amount_cents=body.amount_cents)
+        # Simulate processing latency (provider-dependent).
+        await asyncio.sleep(0.2 + (idx % 5) * 0.05)
+        return {
+            "idx": idx, "provider": provider.value, "outcome": outcome.value,
+            "amount_cents": body.amount_cents,
+            "test_card": req.get("card_last4") or req.get("card", "")[-4:] if req.get("card") else "",
+            "result": "success" if outcome == PaymentOutcome.SUCCESS else "rejected",
+            "reason": outcome.value if outcome != PaymentOutcome.SUCCESS else None,
+            "latency_ms": int(200 + (idx % 5) * 50),
+        }
+
+    results = await asyncio.gather(*[_run_one(i) for i in range(requested)])
+    success = sum(1 for r in results if r["result"] == "success")
+    by_outcome: dict[str, int] = {}
+    for r in results:
+        by_outcome[r["outcome"]] = by_outcome.get(r["outcome"], 0) + 1
+
+    summary = {
+        "provider": provider.value,
+        "concurrent": requested,
+        "success_count": success,
+        "decline_count": requested - success,
+        "success_rate": round(success / requested, 4) if requested else 0,
+        "p50_latency_ms": sorted([r["latency_ms"] for r in results])[len(results) // 2],
+        "p95_latency_ms": sorted([r["latency_ms"] for r in results])[max(0, int(len(results) * 0.95) - 1)],
+        "by_outcome": by_outcome,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    await db.test_runs.update_one(
+        {"run_id": run_id},
+        {"$set": {"payment_summary": summary, "payment_results": results}},
+    )
+    return {"summary": summary, "results": results}
+
+
+@api.get("/runs/{run_id}/payment/results")
+async def get_payment_results(run_id: str, user: User = Depends(current_user)):
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {
+        "summary": run.get("payment_summary") or {},
+        "results": run.get("payment_results") or [],
+    }
+
+
+@api.get("/runs/{run_id}/swarm/live")
+async def get_swarm_live(run_id: str, user: User = Depends(current_user)):
+    """Poll live swarm progress for the UI."""
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    events = await db.run_events.find(
+        {"run_id": run_id, "kind": "swarm_event"},
+        {"_id": 0},
+    ).sort("ts", -1).to_list(200)
+    return {
+        "summary": run.get("swarm_summary") or {},
+        "events": list(reversed(events)),
+    }
 
 
 @api.post("/runs/{run_id}/swarm/config")
