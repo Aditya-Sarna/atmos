@@ -20,11 +20,13 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 from urllib.parse import urlparse
 
-# Make sure Playwright finds the pre-baked browsers regardless of how supervisor was started.
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/pw-browsers")
+ROOT_DIR = Path(__file__).parent
 
 import httpx
 from dotenv import load_dotenv
+
+load_dotenv(ROOT_DIR / ".env")
+
 from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,16 +37,30 @@ from starlette.middleware.cors import CORSMiddleware
 
 from atmos_engine import (
     SCREENSHOTS_DIR,
+    VIDEOS_DIR,
     VIEWPORTS as REAL_VIEWPORTS,
+    configure_playwright_browsers,
     crawl_and_capture,
+    capture_routes_direct,
     apply_patch_full_page,
     llm_analyze_app,
+    llm_analyze_page,
     deterministic_fallback,
     seed_test_cases,
 )
+from architecture_analyzer import analyze_repo
+from fuzz_generator import run_fuzz_suite, _classify_field, fuzz_flow_screens
+from github_runner import boot_repo, parse_github_url
+from github_pr import PatchSpec, open_pull_request
+from route_extractor import extract_routes_from_source
+from route_context import build_route_contexts
+from flow_explorer import explore_app_flow
+from screen_testcases import generate_and_run_screen_tests
+from load_simulator import LoadSimulator, LoadProfile, UserMode
+from payment_sandbox import PaymentSandbox, TestPaymentGenerator, PaymentProvider
+from ship_report import ShipReportGenerator
 
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / ".env")
+configure_playwright_browsers()
 
 # ----------------------------------------------------------------------------
 # Mongo
@@ -60,6 +76,11 @@ db = client[os.environ["DB_NAME"]]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("atmos")
+
+# Hard stop for each fuzz sweep so one bad page cannot stall the whole run.
+FUZZ_URL_TIMEOUT_SECS = int(os.environ.get("ATMOS_FUZZ_URL_TIMEOUT_SECS", "45"))
+# Hard stop for flow exploration so auth-gated apps cannot stall the run.
+EXPLORE_TIMEOUT_SECS = int(os.environ.get("ATMOS_EXPLORE_TIMEOUT_SECS", "120"))
 
 app = FastAPI(title="Atmos")
 api = APIRouter(prefix="/api")
@@ -112,6 +133,11 @@ class Project(BaseModel):
     name: str
     url: str
     app_type: Optional[str] = None
+    source: str = "url"             # "url" | "github"
+    github_url: Optional[str] = None
+    github_owner: Optional[str] = None
+    github_repo: Optional[str] = None
+    has_github_token: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -131,6 +157,17 @@ class TestRun(BaseModel):
 # ----------------------------------------------------------------------------
 
 EMERGENT_SESSION_DATA_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+AUTH_BYPASS_MODE = os.environ.get("ATMOS_DISABLE_AUTH", "auto").strip().lower()
+
+
+def _auth_bypass_enabled(request: Request) -> bool:
+    if AUTH_BYPASS_MODE in {"1", "true", "yes"}:
+        return True
+    if AUTH_BYPASS_MODE in {"0", "false", "no"}:
+        return False
+    host = (request.url.hostname or "").lower()
+    # Default "auto": allow bypass only for local development hosts.
+    return host in {"localhost", "127.0.0.1"}
 
 
 async def _exchange_session_id(session_id: str) -> dict[str, Any]:
@@ -142,6 +179,26 @@ async def _exchange_session_id(session_id: str) -> dict[str, Any]:
 
 
 async def current_user(request: Request) -> User:
+    if _auth_bypass_enabled(request):
+        user = User(
+            user_id="user_local_dev",
+            email="local-dev@atmos.local",
+            name="Local Dev",
+            picture=None,
+        )
+        await db.users.update_one(
+            {"user_id": user.user_id},
+            {"$set": {
+                "user_id": user.user_id,
+                "email": user.email,
+                "name": user.name,
+                "picture": user.picture,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }},
+            upsert=True,
+        )
+        return user
+
     token = request.cookies.get("session_token")
     if not token:
         auth = request.headers.get("authorization")
@@ -173,7 +230,7 @@ class SessionExchangeBody(BaseModel):
 
 
 @api.post("/auth/session")
-async def auth_session(body: SessionExchangeBody, response: Response):
+async def auth_session(body: SessionExchangeBody, request: Request, response: Response):
     data = await _exchange_session_id(body.session_id)
     email = data["email"]
     name = data.get("name") or email.split("@")[0]
@@ -209,13 +266,24 @@ async def auth_session(body: SessionExchangeBody, response: Response):
         }
     )
 
+    cookie_secure_env = os.environ.get("ATMOS_COOKIE_SECURE", "auto").strip().lower()
+    host = (request.url.hostname or "").lower()
+    if cookie_secure_env in {"1", "true", "yes"}:
+        cookie_secure = True
+    elif cookie_secure_env in {"0", "false", "no"}:
+        cookie_secure = False
+    else:
+        # Local HTTP dev cannot persist Secure cookies.
+        cookie_secure = host not in {"localhost", "127.0.0.1"}
+    cookie_samesite = "none" if cookie_secure else "lax"
+
     response.set_cookie(
         key="session_token",
         value=session_token,
         max_age=7 * 24 * 60 * 60,
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=cookie_secure,
+        samesite=cookie_samesite,
         path="/",
     )
     return {"user_id": user_id, "email": email, "name": name, "picture": picture}
@@ -247,7 +315,13 @@ async def auth_logout(request: Request, response: Response):
 
 class ProjectCreate(BaseModel):
     name: str
-    url: str
+    url: Optional[str] = None
+    github_url: Optional[str] = None
+    github_token: Optional[str] = None  # PAT, only used to (a) clone private repos and (b) open PRs
+
+
+class ProjectGithubTokenUpdate(BaseModel):
+    github_token: str
 
 
 def _classify_app_type(url: str, name: str) -> str:
@@ -265,23 +339,70 @@ def _classify_app_type(url: str, name: str) -> str:
 
 @api.post("/projects")
 async def create_project(body: ProjectCreate, user: User = Depends(current_user)):
-    parsed = urlparse(body.url if "://" in body.url else f"https://{body.url}")
-    clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
-    if not parsed.netloc:
-        raise HTTPException(status_code=400, detail="Invalid URL")
+    gh_meta = parse_github_url(body.github_url) if body.github_url else None
+    if not body.url and not gh_meta:
+        raise HTTPException(status_code=400, detail="Provide a URL or a GitHub repository URL.")
+
+    if gh_meta:
+        clean_url = f"https://github.com/{gh_meta['owner']}/{gh_meta['repo']}"
+        source = "github"
+        display_url = clean_url
+    else:
+        parsed = urlparse(body.url if "://" in body.url else f"https://{body.url}")
+        clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+        if not parsed.netloc:
+            raise HTTPException(status_code=400, detail="Invalid URL")
+        display_url = clean_url
+        source = "url"
 
     project_id = f"proj_{uuid.uuid4().hex[:10]}"
     proj = Project(
         project_id=project_id,
         user_id=user.user_id,
-        name=(body.name or "").strip() or parsed.netloc,
-        url=clean_url,
-        app_type=_classify_app_type(clean_url, body.name),
+        name=(body.name or "").strip() or (gh_meta["repo"] if gh_meta else urlparse(display_url).netloc),
+        url=display_url,
+        app_type=_classify_app_type(display_url, body.name),
+        source=source,
+        github_url=clean_url if source == "github" else None,
+        github_owner=gh_meta["owner"] if gh_meta else None,
+        github_repo=gh_meta["repo"] if gh_meta else None,
+        has_github_token=bool(body.github_token),
     )
     doc = proj.model_dump()
     doc["created_at"] = doc["created_at"].isoformat()
+    # Persist the PAT separately so it never leaks via /api/projects.
+    if body.github_token:
+        await db.project_secrets.update_one(
+            {"project_id": project_id},
+            {"$set": {"project_id": project_id, "github_token": body.github_token}},
+            upsert=True,
+        )
     await db.projects.insert_one(doc)
     return proj.model_dump()
+
+
+@api.post("/projects/{project_id}/github-token")
+async def update_project_github_token(project_id: str, body: ProjectGithubTokenUpdate, user: User = Depends(current_user)):
+    project = await db.projects.find_one({"project_id": project_id, "user_id": user.user_id}, {"_id": 0, "source": 1})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("source") != "github":
+        raise HTTPException(status_code=400, detail="Only GitHub projects can store a GitHub token.")
+
+    token = (body.github_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="GitHub token is required.")
+
+    await db.project_secrets.update_one(
+        {"project_id": project_id},
+        {"$set": {"project_id": project_id, "github_token": token}},
+        upsert=True,
+    )
+    await db.projects.update_one(
+        {"project_id": project_id},
+        {"$set": {"has_github_token": True}},
+    )
+    return {"ok": True, "has_github_token": True}
 
 
 @api.get("/projects")
@@ -447,7 +568,7 @@ async def _llm_plan(project: dict[str, Any], command: str) -> dict[str, Any]:
                 "focus_areas (5-8 short strings naming concrete UX surfaces or risks to probe). "
                 "Be specific to the product context. Respond with ONLY JSON, no prose."
             ),
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+        ).with_model("gemini", "gemini-3.5-flash")
         msg = UserMessage(
             text=(
                 f"Target: {project['name']} at {project['url']}\n"
@@ -495,7 +616,7 @@ async def _llm_report(project: dict[str, Any], command: str, focus_areas: list[s
                 "critical_findings (array of 3-5 short sentences), recommendations (array of 5 imperative sentences, each <=15 words), "
                 "competitive_insight (1-2 sentences benchmarking vs industry leaders)."
             ),
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+        ).with_model("gemini", "gemini-3.5-flash")
         prompt = (
             f"Target: {project['name']} ({project['url']})\n"
             f"App type: {project['app_type']}\n"
@@ -1013,28 +1134,132 @@ async def _emit(run_id: str, seq_holder: dict, kind: str, payload: dict[str, Any
     await _publish(run_id, event)
 
 
+def _github_test_cases(pages: list[dict[str, Any]], button_actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Generate test cases from the actual pages and button interactions discovered
+    in a GitHub repo run — every case references a real screenshot and real route."""
+    cases: list[dict[str, Any]] = []
+
+    # Case 1: one per discovered route (navigation test)
+    for p in pages[:8]:
+        route = p.get("route", "/")
+        mobile_cap = p["captures"].get("iPhone SE", {})
+        desktop_cap = p["captures"].get("Desktop 1440", {})
+        caps_ok = mobile_cap.get("ok") and desktop_cap.get("ok")
+        cases.append({
+            "name": f"Route '{route}' renders on both mobile and desktop",
+            "category": "Visual",
+            "steps": [
+                f"Navigate to {p['url']}",
+                "Capture iPhone SE viewport",
+                "Capture Desktop 1440 viewport",
+                "Assert no blank/error screen",
+            ],
+            "expected_result": "pass" if caps_ok else "warn",
+            "explanation": (
+                f"'{route}' captured successfully on mobile and desktop." if caps_ok
+                else f"One or more viewports failed to capture for '{route}'."
+            ),
+            "frames": [f for f in [
+                desktop_cap.get("url_path"),
+                mobile_cap.get("url_path"),
+            ] if f],
+        })
+
+    # Case 2: icon & button interaction tests (one per discovered button action)
+    icon_actions = [a for a in button_actions if a.get("isIcon")]
+    text_actions = [a for a in button_actions if not a.get("isIcon")]
+    for actions, kind in [(icon_actions, "icon"), (text_actions, "button")]:
+        for act in actions[:3]:
+            navigated = act.get("navigated", False)
+            cases.append({
+                "name": f"Click {kind} '{act['label']}' on {act.get('route', act.get('from', ''))}",
+                "category": "UX",
+                "steps": [
+                    f"Navigate to {act.get('from', '')}",
+                    f"Click {kind}: {act['label']}",
+                    "Assert destination rendered" if navigated else "Assert panel / modal visible",
+                ],
+                "expected_result": "pass" if navigated or kind == "button" else "warn",
+                "explanation": (
+                    f"Clicking '{act['label']}' navigated to {act.get('to', '—')}." if navigated
+                    else f"Clicking '{act['label']}' triggered a UI state change (no navigation)."
+                ),
+                "frames": [],
+            })
+
+    # Case 3: responsive sweep summary
+    all_ok = all(
+        p["captures"].get("iPhone SE", {}).get("ok") and p["captures"].get("Desktop 1440", {}).get("ok")
+        for p in pages
+    )
+    cases.append({
+        "name": f"Responsive sweep — {len(pages)} routes on mobile and desktop",
+        "category": "Visual",
+        "steps": [f"Capture {p['url']} on iPhone SE" for p in pages[:6]] + ["Capture all on Desktop 1440"],
+        "expected_result": "pass" if all_ok else "warn",
+        "explanation": (
+            f"All {len(pages)} routes rendered successfully on both viewports." if all_ok
+            else f"Some routes failed to render on one or more viewports."
+        ),
+        "frames": [
+            p["captures"].get("Desktop 1440", {}).get("url_path")
+            for p in pages[:4] if p["captures"].get("Desktop 1440", {}).get("ok")
+        ],
+    })
+
+    # Strip None frames
+    for c in cases:
+        c["frames"] = [f for f in (c.get("frames") or []) if f]
+
+    return cases
+
+
 async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> None:
-    """Real engine: crawl → full-page capture per viewport per page → LLM vision
-    → per-issue patch + re-capture on the issue's page → executive report."""
+    """Real engine: optionally boot a GitHub repo → crawl + click buttons →
+    per-page LLM vision → patch & re-capture → fuzz form fields → architecture
+    analysis → executive report. Emits live JPEG frames the UI consumes as a stream."""
     seq = {"n": 0}
     app_type = project.get("app_type") or "generic"
+    source = project.get("source") or "url"
     try:
         await _emit(run_id, seq, "log", {"level": "info",
-            "message": f"Atmos {command} → {project['name']} ({app_type})"})
+            "message": f"Atmos {command} → {project['name']} ({app_type}) via {source}"})
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             )
+            booted_url: Optional[str] = None
+            repo_root: Optional[Path] = None
+            repo_ctx = None
+
             try:
+                # ── Phase 0: If GitHub source, clone + boot locally ──────
+                if source == "github" and project.get("github_url"):
+                    await _emit(run_id, seq, "phase", {"phase": "github_boot", "label": "Cloning & Booting Repo"})
+
+                    async def gh_log(level: str, message: str) -> None:
+                        await _emit(run_id, seq, "log", {"level": level, "message": message})
+
+                    secret = await db.project_secrets.find_one({"project_id": project["project_id"]}, {"_id": 0})
+                    pat = (secret or {}).get("github_token")
+                    repo_ctx = boot_repo(project["github_url"], on_log=gh_log, github_token=pat)
+                    booted_url, _stack, repo_root = await repo_ctx.__aenter__()
+                    target_url = booted_url
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Cloned repo → booted locally at {booted_url}"})
+                else:
+                    target_url = project["url"]
+
                 # ── Phase 1: Crawl + Capture every reachable page ───────
                 await _emit(run_id, seq, "phase", {"phase": "analyze", "label": "Project Understanding"})
                 await _emit(run_id, seq, "log", {"level": "info",
-                    "message": f"Launching headless Chromium against {project['url']}…"})
+                    "message": f"Launching headless Chromium against {target_url}…"})
 
                 async def on_progress(ev: dict[str, Any]):
-                    if ev.get("type") == "page_capture":
+                    et = ev.get("type")
+                    if et == "page_capture":
                         await _emit(run_id, seq, "page_capture", {
                             "url": ev["url"],
                             "viewport": ev["viewport"],
@@ -1052,30 +1277,149 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                             })
                         await _emit(run_id, seq, "log", {"level": "info",
                             "message": f"{'✓' if ev['ok'] else '✗'} {ev['viewport']} · {ev['url']}"})
+                    elif et == "live_frame":
+                        await _emit(run_id, seq, "live_frame", {
+                            "kind": ev.get("kind", "live"),
+                            "label": ev.get("label", ""),
+                            "image_b64": ev["image_b64"],
+                        })
+                    elif et == "route_context":
+                        await _emit(run_id, seq, "log", {
+                            "level": "info",
+                            "message": (
+                                f"Route {ev.get('route')} -> action={ev.get('action')} "
+                                f"filled={ev.get('filled_fields')} "
+                                f"cta={ev.get('clicked_cta') or 'none'} "
+                                f"sources={', '.join((ev.get('source_files') or [])[:2]) or 'n/a'}"
+                            ),
+                        })
+                    elif et == "route_video":
+                        await _emit(run_id, seq, "route_video", ev)
+                    elif et == "screen":
+                        await _emit(run_id, seq, "screen_discovered", ev)
+                        await _emit(run_id, seq, "log", {
+                            "level": "info",
+                            "message": (
+                                f"Screen '{ev.get('name')}' ({ev.get('route')}) — "
+                                f"{ev.get('field_count', 0)} input(s): "
+                                f"{', '.join((ev.get('fields') or [])[:4]) or 'none'}"
+                            ),
+                        })
+                    elif et == "screen_context":
+                        await _emit(run_id, seq, "log", {
+                            "level": "info",
+                            "message": (
+                                f"Testing '{ev.get('screen_name')}' — {ev.get('purpose') or 'screen'} "
+                                f"· {ev.get('planned_cases', 0)} test case(s)"
+                            ),
+                        })
+                    elif et == "screen_test":
+                        await _emit(run_id, seq, "screen_test", ev)
+                    elif et == "test_case":
+                        await _emit(run_id, seq, "test_case", ev)
+                    elif et == "test_case_step":
+                        await _emit(run_id, seq, "test_case_step", ev)
+                    elif et == "duplicate_capture":
+                        await _emit(run_id, seq, "log", {
+                            "level": "warning",
+                            "message": (
+                                f"Possible duplicate visual state for route {ev.get('route')} "
+                                f"(same as {ev.get('duplicate_of')})."
+                            ),
+                        })
+                    elif et == "fuzz_case":
+                        await _emit(run_id, seq, "fuzz_case", ev)
 
-                await _emit(run_id, seq, "phase", {"phase": "explore", "label": "Crawling Application"})
-                crawl = await crawl_and_capture(browser, project["url"], run_id, on_progress=on_progress)
+                await _emit(run_id, seq, "phase", {"phase": "explore", "label": "Crawling & Clicking Buttons"})
+                flow_screens: list[dict[str, Any]] = []
+                # Always try agentic flow exploration first (for both live URLs and
+                # booted GitHub apps). Falling back to route/direct crawling only
+                # when too few distinct screens are discovered avoids "same first
+                # screen" captures on auth-gated SPAs.
+                try:
+                    flow = await explore_app_flow(
+                        browser,
+                        target_url,
+                        run_id,
+                        on_progress=on_progress,
+                        max_duration_secs=max(30, EXPLORE_TIMEOUT_SECS - 10),
+                    )
+                    flow_screens = flow.get("screens", [])
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("flow explorer failed: %s", exc)
+                    flow = {"screens": [], "pages": [], "button_actions": []}
+
+                if len(flow_screens) >= 2:
+                    crawl = {"pages": flow["pages"], "button_actions": flow.get("button_actions", [])}
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Flow explorer drove the app to {len(flow_screens)} distinct screen(s)."})
+                elif source == "github" and repo_root is not None:
+                    routes = extract_routes_from_source(repo_root)
+                    route_contexts = build_route_contexts(repo_root, routes)
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Flow explorer found {len(flow_screens)} screen(s). Falling back to {len(routes)} source routes."})
+                    crawl = await capture_routes_direct(
+                        browser,
+                        target_url,
+                        routes,
+                        run_id,
+                        route_contexts=route_contexts,
+                        on_progress=on_progress,
+                    )
+                else:
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": "Flow explorer found few screens; falling back to shallow crawl."})
+                    crawl = await crawl_and_capture(browser, target_url, run_id, on_progress=on_progress)
                 pages = crawl["pages"]
+                button_actions = crawl.get("button_actions", [])
                 if not pages or not any(any(c.get("ok") for c in p["captures"].values()) for p in pages):
                     raise RuntimeError("No page captures succeeded — site may be blocking automated traffic.")
 
                 await _emit(run_id, seq, "app_graph", {
                     "pages": [{"url": p["url"], "title": p["title"], "slug": p["slug"]} for p in pages],
+                    "button_actions": button_actions,
                 })
                 await _emit(run_id, seq, "log", {"level": "info",
-                    "message": f"Crawled {len(pages)} page(s). Sending screenshots to Claude vision…"})
+                    "message": f"Crawled {len(pages)} page(s) · {len(button_actions)} button clicks. Per-page vision analysis next."})
 
-                # ── Phase 2: LLM vision analysis ────────────────────────
-                try:
-                    analysis = await llm_analyze_app(project, command, pages)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("LLM analyze failed: %s", exc)
-                    await _emit(run_id, seq, "log", {"level": "warn",
-                        "message": f"Vision LLM unavailable, falling back to heuristics ({type(exc).__name__})."})
-                    analysis = deterministic_fallback(project, pages)
+                # ── Phase 2: Per-page LLM vision analysis ───────────────
+                await _emit(run_id, seq, "phase", {"phase": "per_page", "label": "Per-Page Vision Analysis"})
+                aggregated_issues: list[dict[str, Any]] = []
+                page_summaries: list[dict[str, Any]] = []
+                vp_labels = [v["label"] for v in REAL_VIEWPORTS]
+                for p in pages:
+                    try:
+                        page_analysis = await llm_analyze_page(project, p)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("per-page analysis failed for %s: %s", p["url"], exc)
+                        page_analysis = {"page_summary": "", "issues": []}
+                    summary_line = page_analysis.get("page_summary") or ""
+                    page_summaries.append({"url": p["url"], "title": p["title"], "summary": summary_line})
+                    if summary_line:
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"· {p['url']} — {summary_line}"})
+                    for raw in (page_analysis.get("issues") or [])[:5]:
+                        raw["page_url"] = p["url"]
+                        raw["viewport_label"] = raw.get("viewport_label") if raw.get("viewport_label") in vp_labels else "Desktop 1440"
+                        aggregated_issues.append(raw)
 
-                focus_areas = analysis.get("focus_areas", []) or []
-                narrative = analysis.get("narrative", "")
+                if not aggregated_issues:
+                    # Fallback to the holistic analyzer (or deterministic) if per-page found nothing.
+                    try:
+                        holistic = await llm_analyze_app(project, command, pages)
+                        aggregated_issues = list(holistic.get("issues") or [])
+                        focus_areas = holistic.get("focus_areas", []) or []
+                        narrative = holistic.get("narrative", "")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("holistic fallback failed: %s", exc)
+                        fb = deterministic_fallback(project, pages)
+                        aggregated_issues = list(fb.get("issues") or [])
+                        focus_areas = fb.get("focus_areas", []) or []
+                        narrative = fb.get("narrative", "")
+                else:
+                    focus_areas = [s["summary"].split(".")[0] for s in page_summaries if s["summary"]][:8]
+                    narrative = f"Atmos analyzed {len(pages)} pages and observed {len(aggregated_issues)} issues across them."
+
                 await _emit(run_id, seq, "log", {"level": "info", "message": narrative})
                 await _emit(run_id, seq, "plan", {"focus_areas": focus_areas})
 
@@ -1098,10 +1442,9 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                 # ── Phase 4: Issues — patch & re-capture full pages ─────
                 await _emit(run_id, seq, "phase", {"phase": "issues", "label": "Executed Fixes"})
                 pages_by_url = {p["url"]: p for p in pages}
-                vp_labels = [v["label"] for v in REAL_VIEWPORTS]
                 emitted_issues: list[dict[str, Any]] = []
 
-                for raw in analysis.get("issues", [])[:8]:
+                for raw in aggregated_issues[:12]:
                     page_url = raw.get("page_url") or pages[0]["url"]
                     target_page = pages_by_url.get(page_url) or pages[0]
                     vp_label = raw.get("viewport_label") if raw.get("viewport_label") in vp_labels else "Desktop 1440"
@@ -1116,23 +1459,29 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                     await _emit(run_id, seq, "log", {"level": "info",
                         "message": f"Applying patch for ‘{raw.get('title', 'issue')}’ on {target_page['url']} ({vp_label})…"})
 
-                    after_url = await apply_patch_full_page(
+                    after_result = await apply_patch_full_page(
                         browser, target_page["url"], vp_label,
                         raw.get("patch_css", ""), run_id, f"{iss_id}_after", target_page["slug"],
+                        baseline_url_path=before_url,
                     )
 
                     alts_out = []
                     for ai, alt in enumerate((raw.get("alternatives") or [])[:2]):
-                        alt_url = await apply_patch_full_page(
+                        alt_result = await apply_patch_full_page(
                             browser, target_page["url"], vp_label,
                             alt.get("patch_css", ""), run_id, f"{iss_id}_alt{ai}", target_page["slug"],
+                            baseline_url_path=before_url,
                         )
                         alts_out.append({
                             "label": alt.get("label", f"Alternative {ai+1}"),
                             "summary": alt.get("summary", ""),
                             "tradeoff": alt.get("tradeoff", ""),
                             "patch_css": alt.get("patch_css", ""),
-                            "screenshot_url": alt_url,
+                            "screenshot_url": alt_result.get("after_url"),
+                            "diff_url": alt_result.get("diff_url"),
+                            "changed_pct": alt_result.get("changed_pct"),
+                            "applied": alt_result.get("applied"),
+                            "no_op_reason": alt_result.get("no_op_reason"),
                         })
 
                     issue_full = {
@@ -1153,16 +1502,93 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                             "headline": "Atmos applied this fix",
                             "detail": raw.get("patch_explanation", ""),
                             "code": raw.get("patch_css", ""),
-                            "screenshot_url": after_url,
+                            "screenshot_url": after_result.get("after_url"),
                         },
+                        "diff_url": after_result.get("diff_url"),
+                        "changed_pct": after_result.get("changed_pct"),
+                        "applied": after_result.get("applied"),
+                        "no_op_reason": after_result.get("no_op_reason"),
                         "alternatives": alts_out,
+                        "patch_kind": "css_patch",
                     }
                     emitted_issues.append(issue_full)
                     await _emit(run_id, seq, "issue", issue_full)
 
-                # ── Phase 5: Live test cases ────────────────────────────
+                # ── Phase 5: Fuzz / boundary input test cases ───────────
+                await _emit(run_id, seq, "phase", {"phase": "fuzz", "label": "Boundary Input Fuzzing"})
+                fuzz_cases: list[dict[str, Any]] = []
+                for url in [p["url"] for p in pages[:4]]:
+                    try:
+                        new_cases = await asyncio.wait_for(
+                            run_fuzz_suite(
+                                browser,
+                                url,
+                                run_id,
+                                on_progress=on_progress,
+                                max_fields=4,
+                                max_cases_per_field=8,
+                            ),
+                            timeout=FUZZ_URL_TIMEOUT_SECS,
+                        )
+                        fuzz_cases.extend(new_cases)
+                    except asyncio.TimeoutError:
+                        await _emit(run_id, seq, "log", {
+                            "level": "warning",
+                            "message": f"Fuzz timeout after {FUZZ_URL_TIMEOUT_SECS}s on {url}; continuing run.",
+                        })
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("fuzz failed on %s: %s", url, exc)
+
+                if not fuzz_cases and flow_screens:
+                    await _emit(run_id, seq, "log", {
+                        "level": "info",
+                        "message": f"URL fuzz found no stable inputs; running live fuzz against {len(flow_screens)} discovered screen(s).",
+                    })
+                    try:
+                        live_fuzz = await fuzz_flow_screens(
+                            browser, flow_screens, run_id, on_progress=on_progress,
+                        )
+                        fuzz_cases.extend(live_fuzz)
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"Live screen fuzz: ran {len(live_fuzz)} case(s) with video."})
+                    except Exception as exc:
+                        logger.warning("fuzz_flow_screens failed: %s", exc)
+
+                # ── Phase 5b: Per-screen, context-aware test cases (with video) ─
+                screen_test_results: list[dict[str, Any]] = []
+                if flow_screens:
+                    await _emit(run_id, seq, "phase", {"phase": "screen_tests", "label": "Per-Screen Test Cases"})
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Generating elaborate test cases for {len(flow_screens)} screen(s); recording a video per case."})
+                    try:
+                        screen_test_results = await generate_and_run_screen_tests(
+                            browser, flow_screens, run_id, project, on_progress=on_progress,
+                        )
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"Ran {len(screen_test_results)} per-screen test case(s) with video."})
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("screen tests failed: %s", exc)
+
+                # ── Phase 6: Architecture analysis (GitHub mode only) ───
+                arch_payload: Optional[dict[str, Any]] = None
+                if source == "github" and repo_root is not None:
+                    await _emit(run_id, seq, "phase", {"phase": "architecture", "label": "Architecture Analysis"})
+                    try:
+                        arch_payload = await analyze_repo(repo_root, project["name"], app_type)
+                        await _emit(run_id, seq, "architecture", arch_payload)
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"Architecture score: {arch_payload['score']['overall']}/100 · {len(arch_payload['suggestions'])} suggestions"})
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("arch analysis failed: %s", exc)
+
+                # ── Phase 7: Test cases derived from actual pages ───────
                 await _emit(run_id, seq, "phase", {"phase": "test_cases", "label": "Live Test Case Playback"})
-                cases = seed_test_cases(app_type, pages)
+                # For GitHub repos generate cases from actual routes + button actions.
+                # For URL runs use the page-specific seed function.
+                if source == "github" and pages:
+                    cases = _github_test_cases(pages, button_actions)
+                else:
+                    cases = seed_test_cases(app_type, pages)
                 emitted_cases = []
                 for raw in cases:
                     case_id = f"tc_{uuid.uuid4().hex[:8]}"
@@ -1227,9 +1653,14 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                     "personas": personas,
                     "issues": emitted_issues,
                     "test_cases": emitted_cases,
+                    "fuzz_cases": fuzz_cases,
                     "benchmarks": bench_rows,
                     "focus_areas": focus_areas,
                     "narrative": narrative,
+                    "source": source,
+                    "button_actions": button_actions,
+                    "page_summaries": page_summaries,
+                    "architecture": arch_payload,
                     "app_graph": [
                         {"url": p["url"], "title": p["title"], "slug": p["slug"],
                          "captures": {k: {"ok": v.get("ok"), "url_path": v.get("url_path")} for k, v in p["captures"].items()}}
@@ -1248,6 +1679,11 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                 await _emit(run_id, seq, "summary", summary)
                 await _publish(run_id, {"__type": "done", "status": "completed"})
             finally:
+                if repo_ctx is not None:
+                    try:
+                        await repo_ctx.__aexit__(None, None, None)
+                    except Exception:  # noqa: BLE001
+                        pass
                 await browser.close()
 
     except Exception as exc:  # noqa: BLE001
@@ -1258,6 +1694,232 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
             {"$set": {"status": "failed", "completed_at": datetime.now(timezone.utc).isoformat()}},
         )
         await _publish(run_id, {"__type": "done", "status": "failed"})
+
+
+# ----------------------------------------------------------------------------
+# Apply patches as PRs against the user's GitHub repo
+# ----------------------------------------------------------------------------
+
+
+class ApplyPatchBody(BaseModel):
+    kind: str                       # "issue" | "alt" | "architecture"
+    issue_id: Optional[str] = None  # for kind in ("issue", "alt")
+    alt_index: Optional[int] = None # for kind == "alt"
+    suggestion_id: Optional[str] = None  # for kind == "architecture"
+    base_branch: Optional[str] = None
+
+
+def _find_issue(summary: dict[str, Any], issue_id: str) -> Optional[dict[str, Any]]:
+    for i in summary.get("issues") or []:
+        if i.get("id") == issue_id:
+            return i
+    return None
+
+
+def _find_arch_suggestion(summary: dict[str, Any], suggestion_id: str) -> Optional[dict[str, Any]]:
+    arch = summary.get("architecture") or {}
+    for s in arch.get("suggestions") or []:
+        if s.get("id") == suggestion_id:
+            return s
+    return None
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Swarm Testing Endpoints
+# ────────────────────────────────────────────────────────────────────────
+
+from swarm_api import SwarmConfigBody, SwarmResultsResponse, ShipReportResponse
+
+
+@api.post("/runs/{run_id}/swarm/config")
+async def configure_swarm_test(run_id: str, config: SwarmConfigBody, user: User = Depends(current_user)):
+    """Configure swarm load testing parameters."""
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    
+    # Store swarm configuration
+    await db.test_runs.update_one(
+        {"run_id": run_id},
+        {"$set": {"swarm_config": config.dict()}},
+    )
+    
+    return {"status": "configured", "config": config.dict()}
+
+
+@api.get("/runs/{run_id}/swarm/results")
+async def get_swarm_results(run_id: str, user: User = Depends(current_user)):
+    """Get swarm test results and metrics."""
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    
+    # Collect swarm test events from database
+    events = await db.run_events.find(
+        {"run_id": run_id, "kind": {"$in": ["load_test_event", "swarm_metric"]}},
+        {"_id": 0}
+    ).to_list(None)
+    
+    summary = run.get("swarm_summary", {})
+    
+    return {
+        "test_id": run_id,
+        "status": summary.get("status", "pending"),
+        "events": events,
+        "summary": summary,
+    }
+
+
+@api.post("/runs/{run_id}/swarm/ship-report")
+async def generate_ship_report(run_id: str, user: User = Depends(current_user)):
+    """Generate business-focused Ship Report from swarm + audit results."""
+    from ship_report import ShipReportGenerator
+    
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    
+    summary = run.get("summary", {})
+    swarm_summary = run.get("swarm_summary", {})
+    
+    # Extract relevant metrics
+    load_metrics = {
+        "success_rate": swarm_summary.get("success_rate", 0.0),
+        "error_rate": swarm_summary.get("error_rate", 0.0),
+        "latency_p95": swarm_summary.get("latency_p95_ms", 0.0),
+        "target_users": swarm_summary.get("target_users", 0),
+        "breaking_point_users": swarm_summary.get("breaking_point_users"),
+        "revenue_impact_dollars": swarm_summary.get("revenue_risk_per_hour", 0.0),
+    }
+    
+    accessibility_issues = [
+        i for i in summary.get("issues", [])
+        if i.get("category") == "Accessibility"
+    ]
+    
+    payment_test_results = swarm_summary.get("payment_results", {})
+    
+    # Generate report
+    generator = ShipReportGenerator(app_name=run.get("project_id", "Unknown"))
+    report = generator.generate_from_load_test(
+        load_metrics=load_metrics,
+        accessibility_issues=accessibility_issues,
+        payment_test_results=payment_test_results,
+    )
+    
+    return {
+        "readiness": report.readiness.value,
+        "confidence_score": report.confidence_score,
+        "executive_summary": report.executive_summary,
+        "can_users_use_it": report.can_users_use_it,
+        "can_disabled_users_use_it": report.can_disabled_users_use_it,
+        "can_handle_peak_users": report.can_handle_peak_users,
+        "are_payments_working": report.are_payments_working,
+        "checkout_abandonment_risk": report.checkout_abandonment_risk,
+        "top_3_issues": report.top_3_issues,
+        "launch_blockers": report.launch_blockers,
+        "recommendations": report.recommendations,
+        "metrics": {
+            "success_rate": report.success_rate,
+            "error_rate": report.error_rate,
+            "latency_p95_ms": report.latency_p95_ms,
+            "breaking_point_users": report.breaking_point_users,
+        },
+    }
+
+
+@api.post("/runs/{run_id}/apply")
+async def apply_patch_to_repo(run_id: str, body: ApplyPatchBody, user: User = Depends(current_user)):
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id}, {"_id": 0})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    summary = run.get("summary") or {}
+
+    proj = await db.projects.find_one({"project_id": run["project_id"]}, {"_id": 0})
+    if not proj or proj.get("source") != "github" or not proj.get("github_owner") or not proj.get("github_repo"):
+        raise HTTPException(status_code=400, detail="This run isn't connected to a GitHub repository. Add the repo when creating the project to enable Apply.")
+
+    secret = await db.project_secrets.find_one({"project_id": proj["project_id"]}, {"_id": 0})
+    token = (secret or {}).get("github_token")
+    if not token:
+        raise HTTPException(status_code=400, detail="No GitHub token on file for this project — cannot open a PR.")
+
+    repo_full = f"{proj['github_owner']}/{proj['github_repo']}"
+    base_branch = body.base_branch or "main"
+
+    if body.kind == "issue":
+        if not body.issue_id:
+            raise HTTPException(status_code=400, detail="issue_id required")
+        issue = _find_issue(summary, body.issue_id)
+        if not issue:
+            raise HTTPException(status_code=404, detail="Issue not found in this run")
+        patch = PatchSpec(
+            kind="css_patch",
+            title=issue.get("title", "fix"),
+            body=issue.get("after", {}).get("detail", "") or issue.get("cause", ""),
+            css=issue.get("after", {}).get("code", ""),
+        )
+    elif body.kind == "alt":
+        if not body.issue_id or body.alt_index is None:
+            raise HTTPException(status_code=400, detail="issue_id and alt_index required")
+        issue = _find_issue(summary, body.issue_id)
+        if not issue:
+            raise HTTPException(status_code=404, detail="Issue not found")
+        alts = issue.get("alternatives") or []
+        if body.alt_index < 0 or body.alt_index >= len(alts):
+            raise HTTPException(status_code=400, detail="alt_index out of range")
+        alt = alts[body.alt_index]
+        patch = PatchSpec(
+            kind="css_patch",
+            title=f"{issue.get('title', 'fix')} ({alt.get('label', 'alternative')})",
+            body=alt.get("summary", "") + (f" — Trade-off: {alt['tradeoff']}" if alt.get("tradeoff") else ""),
+            css=alt.get("patch_css", ""),
+        )
+    elif body.kind == "architecture":
+        if not body.suggestion_id:
+            raise HTTPException(status_code=400, detail="suggestion_id required")
+        sugg = _find_arch_suggestion(summary, body.suggestion_id)
+        if not sugg:
+            raise HTTPException(status_code=404, detail="Suggestion not found")
+        if sugg.get("patch_kind") == "manual":
+            raise HTTPException(status_code=400, detail="This suggestion requires manual implementation; no auto-PR available.")
+        files = sugg.get("files") or []
+        if not files:
+            raise HTTPException(status_code=400, detail="Suggestion has no target file path.")
+        patch = PatchSpec(
+            kind=sugg.get("patch_kind", "file_create"),
+            title=sugg.get("title", "architecture change"),
+            body=sugg.get("patch_body") or "",
+            file_path=files[0],
+        )
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown kind: {body.kind}")
+
+    try:
+        result = await asyncio.to_thread(
+            open_pull_request,
+            repo_full,
+            token=token,
+            patch=patch,
+            base_branch=base_branch,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("PR creation failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Could not open PR: {exc}")
+
+    await db.applied_patches.insert_one({
+        "run_id": run_id,
+        "user_id": user.user_id,
+        "kind": body.kind,
+        "issue_id": body.issue_id,
+        "alt_index": body.alt_index,
+        "suggestion_id": body.suggestion_id,
+        "pr_url": result["url"],
+        "pr_number": result["number"],
+        "branch": result["branch"],
+        "applied_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return result
 
 
 # ----------------------------------------------------------------------------
@@ -1290,6 +1952,7 @@ app.include_router(api)
 
 # Serve screenshots from /api/screens (mounted before CORS so headers apply correctly).
 app.mount("/api/screens", StaticFiles(directory=str(SCREENSHOTS_DIR)), name="screens")
+app.mount("/api/videos", StaticFiles(directory=str(VIDEOS_DIR)), name="videos")
 
 app.add_middleware(
     CORSMiddleware,

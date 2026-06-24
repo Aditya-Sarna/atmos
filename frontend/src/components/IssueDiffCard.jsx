@@ -1,7 +1,9 @@
 import { useState } from "react";
 import Scene from "@/components/Scene";
 import RealShot from "@/components/RealShot";
-import { ArrowRight, Sparkles, GitBranch, FileCode2 } from "lucide-react";
+import { ArrowRight, Sparkles, GitBranch, FileCode2, CheckCircle2, AlertTriangle } from "lucide-react";
+import { applyPatch, BACKEND_URL } from "@/lib/api";
+import { toast } from "sonner";
 
 const SEV_COLOR = { critical: "#FF3B30", high: "#FF3B30", medium: "#FF9500", low: "#86868B" };
 
@@ -13,12 +15,37 @@ const SEV_COLOR = { critical: "#FF3B30", high: "#FF3B30", medium: "#FF9500", low
  * and falls back to a CSS-only Scene illustration when those are missing
  * (e.g. site blocked the bot or engine ran in demo mode).
  */
-export default function IssueDiffCard({ issue }) {
+export default function IssueDiffCard({ issue, runId }) {
   const [altIndex, setAltIndex] = useState(-1);
   const alt = altIndex >= 0 ? issue.alternatives?.[altIndex] : null;
+  const [busy, setBusy] = useState(null); // "issue" | `alt-${i}`
+  const [pr, setPr] = useState(null);
 
   const hasRealBefore = !!issue.before?.screenshot_url;
   const hasRealAfter = !!issue.after?.screenshot_url;
+  const diffUrl = issue.after?.diff_url;
+  const changedPct = issue.after?.changed_pct;
+  const noOp = issue.after?.applied === false;
+
+  const apply = async (body, key) => {
+    if (!runId) {
+      toast.error("Run id missing", { description: "Reload the run page and try again." });
+      return;
+    }
+    setBusy(key);
+    try {
+      const r = await applyPatch(runId, body);
+      setPr({ url: r.data.url, number: r.data.number });
+      toast.success(`PR #${r.data.number} opened`, {
+        description: r.data.url,
+        action: { label: "Open", onClick: () => window.open(r.data.url, "_blank") },
+      });
+    } catch (e) {
+      toast.error("Could not open PR", { description: e?.response?.data?.detail || e.message });
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
     <div className="card-elev p-5 md:p-6 anim-slide-up" data-testid={`issue-diff-${issue.id}`}>
@@ -45,7 +72,42 @@ export default function IssueDiffCard({ issue }) {
           )}
           {issue.cause && <div className="text-sm text-[#1D1D1F]/70 mt-2">Likely cause: {issue.cause}</div>}
         </div>
+        {/* Tick-to-apply on the primary fix */}
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => apply({ kind: "issue", issue_id: issue.id }, "issue")}
+            disabled={busy === "issue" || !!pr}
+            className="rounded-full h-9 px-4 inline-flex items-center gap-1.5 bg-[#1D1D1F] text-white text-xs disabled:opacity-60"
+            data-testid={`issue-apply-${issue.id}`}
+            title="Open a PR with this fix"
+          >
+            <CheckCircle2 className="h-4 w-4" strokeWidth={2} />
+            {pr ? `PR #${pr.number}` : busy === "issue" ? "Opening PR…" : "Apply via PR"}
+          </button>
+          {pr && (
+            <a
+              href={pr.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[10px] text-[#0071E3] underline"
+            >
+              view PR
+            </a>
+          )}
+        </div>
       </div>
+
+      {/* No-op warning when the engine couldn't actually apply the patch */}
+      {noOp && (
+        <div className="mt-4 rounded-xl border border-[#FF9500]/40 bg-[#FFF8EC] p-3 flex gap-2 text-xs text-[#7a4a00]" data-testid={`issue-noop-${issue.id}`}>
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-[#FF9500]" strokeWidth={1.75} />
+          <div>
+            <div className="font-medium">Patch didn’t change the live page.</div>
+            <div className="opacity-80">{issue.after?.no_op_reason || "The selector didn’t match any element on the rendered page."} The “After” shot is overlaid with a diagnostic banner so it’s visibly different.</div>
+          </div>
+        </div>
+      )}
 
       {/* Before / After diff */}
       <div className="mt-5 grid md:grid-cols-2 gap-4">
@@ -97,6 +159,24 @@ export default function IssueDiffCard({ issue }) {
               )}
             </div>
           )}
+          {/* Pixel diff overlay — makes “identical-looking” patches obvious */}
+          {diffUrl && (
+            <div className="mt-3" data-testid={`issue-diff-overlay-${issue.id}`}>
+              <div className="text-[10px] uppercase tracking-[0.18em] text-[#86868B] mb-1 flex items-center justify-between">
+                <span>Pixel diff</span>
+                {typeof changedPct === "number" && (
+                  <span className={`tabular-nums ${changedPct < 0.5 ? "text-[#FF9500]" : "text-[#34C759]"}`}>
+                    {changedPct.toFixed(2)}% changed
+                  </span>
+                )}
+              </div>
+              <img
+                src={diffUrl.startsWith("http") ? diffUrl : `${BACKEND_URL}${diffUrl}`}
+                alt="Before vs after pixel diff"
+                className="w-full rounded-lg border border-black/10 block"
+              />
+            </div>
+          )}
         </div>
       </div>
 
@@ -113,22 +193,43 @@ export default function IssueDiffCard({ issue }) {
           <div className="grid sm:grid-cols-2 gap-3">
             {issue.alternatives.map((a, i) => {
               const active = altIndex === i;
+              const altKey = `alt-${i}`;
               return (
-                <button
+                <div
                   key={i}
-                  type="button"
-                  onClick={() => setAltIndex(active ? -1 : i)}
-                  className={`text-left rounded-2xl border p-4 transition active:scale-[0.99] ${active ? "border-[#0071E3] bg-[#F5FAFF]" : "border-black/10 bg-white hover:border-black/25"}`}
+                  className={`rounded-2xl border p-4 transition ${active ? "border-[#0071E3] bg-[#F5FAFF]" : "border-black/10 bg-white"}`}
                   data-testid={`alternative-${issue.id}-${i}`}
                 >
-                  <div className="font-display text-base font-medium">{a.label}</div>
-                  <div className="text-xs text-[#1D1D1F]/70 mt-1 leading-snug">{a.summary}</div>
-                  {a.tradeoff && <div className="text-[11px] text-[#86868B] mt-2">Trade-off: {a.tradeoff}</div>}
-                  <div className="mt-2 text-[11px] text-[#0071E3] flex items-center gap-1">
-                    {active ? "Hide preview" : "Preview on your app"}
-                    <ArrowRight className="h-3 w-3" />
+                  <button
+                    type="button"
+                    onClick={() => setAltIndex(active ? -1 : i)}
+                    className="text-left w-full"
+                  >
+                    <div className="font-display text-base font-medium">{a.label}</div>
+                    <div className="text-xs text-[#1D1D1F]/70 mt-1 leading-snug">{a.summary}</div>
+                    {a.tradeoff && <div className="text-[11px] text-[#86868B] mt-2">Trade-off: {a.tradeoff}</div>}
+                    {typeof a.changed_pct === "number" && (
+                      <div className="text-[10px] text-[#86868B] mt-1 tabular-nums">{a.changed_pct.toFixed(2)}% pixel change</div>
+                    )}
+                  </button>
+                  <div className="flex items-center justify-between gap-2 mt-3">
+                    <span className="text-[11px] text-[#0071E3] flex items-center gap-1">
+                      {active ? "Hide preview" : "Preview on your app"}
+                      <ArrowRight className="h-3 w-3" />
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => apply({ kind: "alt", issue_id: issue.id, alt_index: i }, altKey)}
+                      disabled={busy === altKey}
+                      className="rounded-full h-8 px-3 inline-flex items-center gap-1.5 bg-white border border-black/10 text-[11px] hover:border-black/30 disabled:opacity-60"
+                      data-testid={`alt-apply-${issue.id}-${i}`}
+                      title="Open a PR with this alternative"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2} />
+                      {busy === altKey ? "Opening PR…" : "Apply"}
+                    </button>
                   </div>
-                </button>
+                </div>
               );
             })}
           </div>

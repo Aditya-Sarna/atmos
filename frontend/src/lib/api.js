@@ -28,6 +28,10 @@ export async function createProject(payload) {
   return api.post("/projects", payload);
 }
 
+export async function updateProjectGithubToken(projectId, githubToken) {
+  return api.post(`/projects/${projectId}/github-token`, { github_token: githubToken });
+}
+
 export async function getProject(projectId) {
   return api.get(`/projects/${projectId}`);
 }
@@ -42,4 +46,13 @@ export async function getRun(runId) {
 
 export async function listCommands() {
   return api.get("/commands");
+}
+
+/**
+ * Open a PR on the project's GitHub repo applying a fix.
+ * @param {string} runId
+ * @param {{ kind: 'issue'|'alt'|'architecture', issue_id?: string, alt_index?: number, suggestion_id?: string, base_branch?: string }} body
+ */
+export async function applyPatch(runId, body) {
+  return api.post(`/runs/${runId}/apply`, body);
 }
