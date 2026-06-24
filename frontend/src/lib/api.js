@@ -56,3 +56,27 @@ export async function listCommands() {
 export async function applyPatch(runId, body) {
   return api.post(`/runs/${runId}/apply`, body);
 }
+
+// ── Swarm load testing ─────────────────────────────────────────────────────
+export async function startSwarm(runId, body) {
+  return api.post(`/runs/${runId}/swarm/start`, body);
+}
+export async function getSwarmLive(runId) {
+  return api.get(`/runs/${runId}/swarm/live`);
+}
+export async function generateShipReport(runId) {
+  return api.post(`/runs/${runId}/swarm/ship-report`);
+}
+
+// ── Payment simulation ─────────────────────────────────────────────────────
+export async function simulatePayments(runId, body) {
+  return api.post(`/runs/${runId}/payment/simulate`, body);
+}
+export async function getPaymentResults(runId) {
+  return api.get(`/runs/${runId}/payment/results`);
+}
+
+// ── GitHub token test ──────────────────────────────────────────────────────
+export async function testGithubToken(projectId) {
+  return api.post(`/projects/${projectId}/github-token/test`);
+}

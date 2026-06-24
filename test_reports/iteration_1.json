@@ -1,0 +1,57 @@
+{
+  "summary": "Tested Atmos new endpoints (Swarm, Payment, GitHub-token-test) plus the 4-part UI (Run capability hero, Swarm/Payments/Architecture tabs). Backend: 9/12 pytest pass; Payment simulate endpoint returns 500 for all 3 providers due to TestPaymentGenerator signature mismatch. Frontend: Dashboard, New Run flow, RunMonitor, capability hero and all data-testids render correctly with auth bypass.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/runs/{run_id}/payment/simulate",
+        "issue": "Returns 500 for stripe/razorpay/paypal. Root cause: server.py:1962 calls `gen.generate_test_payment_request(outcome=outcome, amount_cents=...)` but payment_sandbox.py:183 defines the method as `generate_test_payment_request(self, amount_cents, outcomes: List[PaymentOutcome]=None)` — it accepts `outcomes` (list) not `outcome` (single). TypeError: unexpected keyword argument 'outcome'. Backend traceback in /var/log/supervisor/backend.err.log.",
+        "priority": "CRITICAL"
+      },
+      {
+        "endpoint": "POST /api/runs/{run_id}/payment/simulate (data contract)",
+        "issue": "Default body outcomes ['success','decline_insufficient_funds','fraud','3ds_required'] are mostly invalid: PaymentOutcome enum has 'insufficient_funds' (no 'decline_' prefix) and does NOT define 'fraud' or '3ds_required'. After the runtime filter at server.py:1957, only 'success' would survive, masking the intended outcome mix. Even after fixing the signature, the enum needs FRAUD / THREEDS_REQUIRED members (and rename DECLINE_INSUFFICIENT_FUNDS) or the server should translate names.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "RunMonitor periodic polling",
+        "issue": "Multiple background fetches log '401 Unauthorized' to console even with ATMOS_DISABLE_AUTH=1. Functionally harmless because /api/auth/me returns the local user, but the 401s suggest a fetcher without credentials or hitting an endpoint that still requires Bearer headers. Worth auditing the api client and Auth context for the test env.",
+        "affected_selectors": []
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_new_endpoints.py",
+    "/app/test_reports/pytest/new_endpoints.xml"
+  ],
+  "action_items": [
+    "Fix /api/runs/{run_id}/payment/simulate: align server.py call site with payment_sandbox.TestPaymentGenerator.generate_test_payment_request signature (use a list, OR add a `generate_one(outcome, amount_cents)` helper).",
+    "Add missing PaymentOutcome enum members ('fraud', '3ds_required') and/or remap the request's outcome strings (e.g. 'decline_insufficient_funds' -> INSUFFICIENT_FUNDS) so the default outcome mix in the request body actually exercises mixed outcomes instead of silently collapsing to 'success'.",
+    "Investigate the silent 401s from background API polling on /runs/{id} pages while ATMOS_DISABLE_AUTH=1.",
+    "Optional: increase backend resilience — when WatchFiles reloads on test-file edits inside /app/backend/tests, the process got stuck in 'Application shutdown complete' and needed a manual `supervisorctl restart backend`."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 2275 lines — split into routers (projects, runs, swarm, payments, github) for maintainability.",
+    "Payment endpoint code path lacks try/except: any TypeError inside _run_one propagates as a 500 with no useful detail. Wrap asyncio.gather and convert to HTTPException(422/500) with a JSON detail describing the bad input.",
+    "Outcome filtering at server.py:1957 silently drops unknown outcomes. Prefer raising 400 with the list of unknown values so callers (UI) can self-correct."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_new_endpoints.py (new file)"
+  ],
+  "success_rate": {
+    "backend": "75% (9/12)",
+    "frontend": "100% of testable surface (dashboard, new run, run monitor capability hero, all 4 tabs and their data-testids)"
+  },
+  "test_credentials": "Not needed — ATMOS_DISABLE_AUTH=1 is set; /api/auth/me returns user_local_dev directly. /app/memory/test_credentials.md not present.",
+  "seed_data_creation": "Created TEST_swarm_example (https://example.com) and TEST_gh_project (https://github.com/octocat/hello-world) projects; ran one /atmos test run on example.com and one swarm start on it. All flagged with TEST_ prefix.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend has hot-reload but it occasionally hangs after a WatchFiles reload triggered by changes inside /app/backend/tests/*.py — restart supervisor if curl times out. Pytest file /app/backend/tests/test_new_endpoints.py is the authoritative regression suite for the new endpoints (Swarm + Payments + GitHub-token-test). Existing /app/backend/tests/test_atmos.py uses an injected bearer session and still works, but is heavier. Frontend Playwright flow used here: /dashboard → 'New test run' → fill Name + URL → 'Start run' → /runs/{id} → click cap-swarm / cap-payments / cap-architecture and assert swarm-panel / payment-panel / architecture empty-state.",
+  "rca of the issue": "Payment simulate 500: server.py:1962 invokes gen.generate_test_payment_request(outcome=<single PaymentOutcome>, amount_cents=int). The actual signature in payment_sandbox.py:183 is generate_test_payment_request(self, amount_cents, outcomes=None) — only accepts a List[PaymentOutcome]. Python raises TypeError: got an unexpected keyword argument 'outcome'. Compounding issue: even with the right signature, three of the four default outcomes ('decline_insufficient_funds', 'fraud', '3ds_required') don't exist as PaymentOutcome.value, so they're filtered out at server.py:1957. Reproduction: POST /api/runs/{run_id}/payment/simulate with body {provider:'stripe', concurrent:10, outcomes:['success','decline_insufficient_funds','fraud','3ds_required'], amount_cents:4999} → HTTP 500 Internal Server Error. Mitigation (suggested): either change server.py to call gen.generate_test_card(outcome) directly and synthesize the request dict inline, OR refactor generate_test_payment_request to accept a single outcome OR enrich PaymentOutcome with the missing members and map names."
+}

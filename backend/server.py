@@ -428,6 +428,92 @@ async def update_project_github_token(project_id: str, body: ProjectGithubTokenU
     return {"ok": True, "has_github_token": True}
 
 
+@api.post("/projects/{project_id}/github-token/test")
+async def test_project_github_token(project_id: str, user: User = Depends(current_user)):
+    """Validate that the stored GitHub PAT can actually open a PR.
+
+    Checks:
+      1. Token exists.
+      2. Token authenticates to api.github.com (returns viewer login).
+      3. Token has access to the linked repo.
+      4. Token has the scopes required to create branches and PRs (repo or public_repo).
+    """
+    project = await db.projects.find_one({"project_id": project_id, "user_id": user.user_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("source") != "github":
+        raise HTTPException(status_code=400, detail="Only GitHub projects can be tested.")
+
+    secret = await db.project_secrets.find_one({"project_id": project_id}, {"_id": 0})
+    token = (secret or {}).get("github_token")
+    if not token:
+        return {"ok": False, "stage": "missing", "detail": "No GitHub token stored for this project. Paste a Personal Access Token (with `repo` scope) on the New Run page."}
+
+    repo_full = f"{project['github_owner']}/{project['github_repo']}"
+
+    def _probe() -> dict:
+        try:
+            from github import Github, GithubException  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "stage": "import", "detail": f"PyGithub missing: {exc}"}
+
+        try:
+            gh = Github(token, per_page=1, timeout=15)
+            viewer = gh.get_user()
+            login = viewer.login  # forces a request
+        except GithubException as exc:
+            status = getattr(exc, "status", 0)
+            if status == 401:
+                return {"ok": False, "stage": "auth", "detail": "GitHub returned 401 — the token is invalid, revoked or expired."}
+            return {"ok": False, "stage": "auth", "detail": f"GitHub returned {status}: {exc.data}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "stage": "auth", "detail": f"Could not reach GitHub: {exc}"}
+
+        # Probe repo access.
+        try:
+            repo = gh.get_repo(repo_full)
+            default_branch = repo.default_branch
+            try:
+                permissions = getattr(repo, "permissions", None)
+                can_push = bool(permissions and getattr(permissions, "push", False))
+            except Exception:  # noqa: BLE001
+                can_push = False
+        except GithubException as exc:
+            status = getattr(exc, "status", 0)
+            if status == 404:
+                return {"ok": False, "stage": "repo", "detail": f"This token cannot see {repo_full}. Make sure the PAT has `repo` scope and access to that repository (for org repos, the org must have approved the token)."}
+            return {"ok": False, "stage": "repo", "detail": f"GitHub returned {status}: {exc.data}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "stage": "repo", "detail": str(exc)}
+
+        # Scopes (classic PATs only — fine-grained tokens won't expose this header).
+        scopes: list[str] = []
+        try:
+            # Direct REST hit so we can read the X-OAuth-Scopes header.
+            import httpx
+            with httpx.Client(timeout=10) as h:
+                r = h.get("https://api.github.com/user", headers={"Authorization": f"Bearer {token}"})
+                if r.status_code == 200:
+                    raw = r.headers.get("x-oauth-scopes") or ""
+                    scopes = [s.strip() for s in raw.split(",") if s.strip()]
+        except Exception:  # noqa: BLE001
+            scopes = []
+
+        return {
+            "ok": True,
+            "stage": "ready",
+            "login": login,
+            "repo": repo_full,
+            "default_branch": default_branch,
+            "can_push": can_push,
+            "scopes": scopes,
+            "detail": "Token is valid and can open PRs against this repo.",
+        }
+
+    return await asyncio.to_thread(_probe)
+
+
+
 @api.get("/projects")
 async def list_projects(user: User = Depends(current_user)):
     cur = db.projects.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", -1)
@@ -2111,7 +2197,21 @@ async def apply_patch_to_repo(run_id: str, body: ApplyPatchBody, user: User = De
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("PR creation failed: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Could not open PR: {exc}")
+        # Surface a more useful diagnostic to the UI.
+        err_text = str(exc)
+        hint = ""
+        low = err_text.lower()
+        if "401" in low or "bad credentials" in low:
+            hint = " Tip: the stored GitHub token is invalid or expired. Use the Test connection button to re-validate it."
+        elif "403" in low and "rate" in low:
+            hint = " Tip: GitHub rate-limited the token; try again in a minute."
+        elif "403" in low:
+            hint = " Tip: the token lacks `repo` write access on this repository, or your org hasn't approved the PAT."
+        elif "404" in low:
+            hint = " Tip: the token cannot see this repo. For org-owned repos, the org must approve the PAT."
+        elif "422" in low and "branch" in low:
+            hint = " Tip: a branch with that name already exists — Atmos retries with a numeric suffix; try again."
+        raise HTTPException(status_code=502, detail=f"Could not open PR: {err_text}.{hint}")
 
     await db.applied_patches.insert_one({
         "run_id": run_id,

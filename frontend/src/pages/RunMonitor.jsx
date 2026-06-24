@@ -12,10 +12,12 @@ import { TestCaseList, TestCaseTheatre } from "@/components/TestCases";
 import IssueDiffCard from "@/components/IssueDiffCard";
 import RealShot from "@/components/RealShot";
 import AppGraph from "@/components/AppGraph";
+import SwarmPanel from "@/components/SwarmPanel";
+import PaymentPanel from "@/components/PaymentPanel";
 import {
   ArrowUpRight, Eye, FileText, Activity, AlertTriangle, AlertOctagon,
   MousePointerClick, Smartphone, Gauge, Sparkles, GitCompare, Accessibility, Mic, CheckCircle2, FlaskConical,
-  Github, Layers, Radio,
+  Github, Layers, Radio, Users, CreditCard,
 } from "lucide-react";
 
 const PHASE_ICONS = {
@@ -248,6 +250,8 @@ export default function RunMonitor() {
   const [activeTab, setActiveTab] = useState("live");
   const [selectedCaseId, setSelectedCaseId] = useState(null);
   const [issuePageFilter, setIssuePageFilter] = useState(null);
+  const [testingToken, setTestingToken] = useState(false);
+  const [tokenTestResult, setTokenTestResult] = useState(null);
 
   // Auto-switch focus: when test_cases phase begins, prefer that tab; auto-select the running case.
   useEffect(() => {
@@ -336,18 +340,84 @@ export default function RunMonitor() {
                 </div>
                 <div className="text-[#86868B] mt-1">
                   {project?.has_github_token
-                    ? "Apply via PR will use the stored project token. You can replace it from New Run if needed."
+                    ? "Apply via PR will use the stored project token. Use Test connection to verify it works before clicking Apply."
                     : "Add a GitHub token from New Run to let Atmos open PRs for findings."}
                 </div>
+                {tokenTestResult && (
+                  <div
+                    className={`mt-2 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs ${
+                      tokenTestResult.ok ? "bg-[#E8F8EE] text-[#34C759]" : "bg-[#FFF1F1] text-[#FF3B30]"
+                    }`}
+                    data-testid="github-token-test-result"
+                  >
+                    {tokenTestResult.ok ? <CheckCircle2 className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
+                    {tokenTestResult.detail}
+                  </div>
+                )}
               </div>
             </div>
-            <Link to={`/dashboard/new?project=${project?.project_id || ""}`}>
-              <Button variant="outline" className="rounded-full" data-testid="manage-github-token-button">
-                {project?.has_github_token ? "Manage token" : "Enable PRs"}
-              </Button>
-            </Link>
+            <div className="flex items-center gap-2">
+              {project?.has_github_token && (
+                <Button
+                  variant="outline"
+                  className="rounded-full"
+                  data-testid="test-github-token-button"
+                  disabled={testingToken}
+                  onClick={async () => {
+                    setTestingToken(true);
+                    setTokenTestResult(null);
+                    try {
+                      const r = await (await import("@/lib/api")).testGithubToken(project.project_id);
+                      setTokenTestResult(r.data);
+                      if (r.data?.ok) toast.success("GitHub token is valid", { description: `Logged in as ${r.data.login}` });
+                      else toast.error("Token check failed", { description: r.data?.detail });
+                    } catch (e) {
+                      const detail = e?.response?.data?.detail || e.message;
+                      setTokenTestResult({ ok: false, detail });
+                      toast.error("Token check failed", { description: detail });
+                    } finally {
+                      setTestingToken(false);
+                    }
+                  }}
+                >
+                  {testingToken ? "Testing…" : "Test connection"}
+                </Button>
+              )}
+              <Link to={`/dashboard/new?project=${project?.project_id || ""}`}>
+                <Button variant="outline" className="rounded-full" data-testid="manage-github-token-button">
+                  {project?.has_github_token ? "Manage token" : "Enable PRs"}
+                </Button>
+              </Link>
+            </div>
           </div>
         )}
+
+        {/* 4-capability hero: Test · Swarm · Payments · Architecture */}
+        <div className="lg:col-span-12 grid grid-cols-2 md:grid-cols-4 gap-3" data-testid="capability-hero">
+          {[
+            { id: "live",         icon: Radio,       title: "Real testing",        sub: "Crawl · click · screenshot · LLM audit" },
+            { id: "swarm",        icon: Users,       title: "Realistic swarms",    sub: "N concurrent Playwright users" },
+            { id: "payments",     icon: CreditCard,  title: "Payment sandbox",     sub: "Stripe / Razorpay / PayPal at scale" },
+            { id: "architecture", icon: Layers,      title: "Architecture",        sub: "Industry-peer benchmark + auto-PR" },
+          ].map((c) => {
+            const Icon = c.icon;
+            const active = activeTab === c.id;
+            return (
+              <button
+                key={c.id}
+                onClick={() => setActiveTab(c.id)}
+                data-testid={`cap-${c.id}`}
+                className={`text-left rounded-2xl border p-4 transition-all ${
+                  active ? "bg-[#1D1D1F] text-white border-[#1D1D1F]" : "bg-white border-black/10 hover:border-black/30"
+                }`}
+              >
+                <Icon className={`h-5 w-5 ${active ? "text-white" : "text-[#0071E3]"}`} strokeWidth={1.5} />
+                <div className={`font-medium text-sm mt-2 ${active ? "text-white" : ""}`}>{c.title}</div>
+                <div className={`text-[11px] mt-0.5 ${active ? "text-white/60" : "text-[#86868B]"}`}>{c.sub}</div>
+              </button>
+            );
+          })}
+        </div>
 
         {/* LEFT: tabbed view — live capture / test cases (with playback) / issues with diffs */}
         <section className="lg:col-span-8 space-y-4 md:space-y-6">
@@ -364,6 +434,12 @@ export default function RunMonitor() {
               </TabsTrigger>
               <TabsTrigger value="fuzz" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-fuzz">
                 Fuzz {fuzzCases.length > 0 && <span className="ml-1.5 text-xs opacity-70">({fuzzCases.length})</span>}
+              </TabsTrigger>
+              <TabsTrigger value="swarm" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-swarm">
+                Swarm
+              </TabsTrigger>
+              <TabsTrigger value="payments" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-payments">
+                Payments
               </TabsTrigger>
               <TabsTrigger value="architecture" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-architecture">
                 Architecture {architecture && <span className="ml-1.5 text-xs opacity-70">{architecture?.score?.overall ?? ""}</span>}
@@ -631,6 +707,16 @@ export default function RunMonitor() {
               ) : (
                 <FuzzCaseList cases={fuzzCases} />
               )}
+            </TabsContent>
+
+            {/* SWARM */}
+            <TabsContent value="swarm" className="space-y-3 mt-4" data-testid="tab-swarm-content">
+              <SwarmPanel runId={runId} />
+            </TabsContent>
+
+            {/* PAYMENTS */}
+            <TabsContent value="payments" className="space-y-3 mt-4" data-testid="tab-payments-content">
+              <PaymentPanel runId={runId} />
             </TabsContent>
 
             {/* ARCHITECTURE */}

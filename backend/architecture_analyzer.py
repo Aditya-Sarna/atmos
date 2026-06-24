@@ -501,6 +501,38 @@ async def llm_peer_comparison(project_name: str, archetype: str, scan: dict[str,
     if not api_key:
         return {"peers": [], "summary": ""}
 
+    # Curated archetype → industry peer hints. The LLM still picks ultimately,
+    # but we anchor it on the right *industry* and the right *feature similarity*.
+    archetype_peers: dict[str, list[str]] = {
+        "ecommerce": ["Shopify Storefront", "Amazon", "Allbirds", "Glossier"],
+        "finance": ["Stripe Dashboard", "Plaid", "Wise", "Robinhood"],
+        "fintech": ["Stripe Dashboard", "Plaid", "Wise", "Robinhood"],
+        "payments": ["Stripe Dashboard", "Razorpay", "Adyen", "Square"],
+        "saas": ["Linear", "Notion", "Vercel Dashboard", "Stripe Dashboard"],
+        "productivity": ["Notion", "Linear", "Height", "Coda"],
+        "social": ["Twitter/X", "Threads", "Mastodon", "Reddit"],
+        "messaging": ["Slack", "Discord", "Signal", "Telegram Web"],
+        "media": ["Spotify Web", "Netflix", "YouTube", "Apple Music Web"],
+        "developer-tool": ["GitHub", "Vercel", "Linear", "Sentry"],
+        "developer_tool": ["GitHub", "Vercel", "Linear", "Sentry"],
+        "dashboard": ["Linear", "Stripe Dashboard", "Vercel Dashboard", "Datadog"],
+        "landing": ["Apple.com", "Linear.app", "Stripe.com", "Vercel.com"],
+        "marketing": ["Apple.com", "Linear.app", "Stripe.com", "Vercel.com"],
+        "ai": ["OpenAI Platform", "Anthropic Console", "Replicate", "HuggingFace"],
+        "education": ["Khan Academy", "Coursera", "Brilliant", "Duolingo"],
+        "blog": ["Medium", "Substack", "Ghost", "Mirror"],
+        "docs": ["Notion", "GitBook", "Mintlify", "Docusaurus"],
+    }
+    archetype_key = (archetype or "").lower().strip().replace(" ", "_")
+    suggested_peers = archetype_peers.get(archetype_key) or archetype_peers.get(archetype_key.split("_")[0], [])
+    peer_hint = (
+        f"For the archetype '{archetype}' (matched to '{archetype_key}'), pick 3 peers from this curated list "
+        f"of industry leaders shipping similar features: {', '.join(suggested_peers)}. "
+        "Only diverge from this list if the project is clearly in a different industry, and explain why."
+        if suggested_peers else
+        "Pick 3 well-known, currently-shipping industry peers in the same archetype with the most feature overlap."
+    )
+
     chat = LlmChat(
         api_key=api_key,
         session_id=f"arch_{uuid.uuid4().hex[:6]}",
@@ -508,6 +540,10 @@ async def llm_peer_comparison(project_name: str, archetype: str, scan: dict[str,
             "You are an enterprise software architect. Compare a submitted repo's architecture to "
             "well-known industry peers in the same archetype. You are shown the ACTUAL CODE from "
             "the repo's largest files. Be specific about concrete problems visible in the code. "
+            "For each of the 3 peers, you MUST give:\n"
+            "  - name: the peer app\n"
+            "  - what_they_do_better: 1-2 sentences describing a concrete architectural strength of theirs that this repo lacks (cite a known practice; e.g. 'Linear uses an in-memory cache with optimistic mutations')\n"
+            "  - what_to_copy: an exact, actionable change this repo could make (folder, library, or pattern name)\n"
             "Return ONLY JSON of shape: "
             "{ summary: string, peers: [{name, what_they_do_better, what_to_copy}], next_3_moves: [string,string,string] }"
         ),
@@ -537,9 +573,11 @@ async def llm_peer_comparison(project_name: str, archetype: str, scan: dict[str,
         f"Languages: {scan['languages']}\nLayers detected: {scan['layers']}\n"
         f"Has TS: {scan['has_typescript']} · tests: {scan['has_tests']} · state: {scan['has_state_layer']}\n"
         f"Overall architecture score: {score['overall']}/100\n\n"
+        f"{peer_hint}\n\n"
         f"Code samples from the repository:\n{code_context}\n\n"
-        "Based on the ACTUAL CODE above, compare to 3 well-known peer apps in this archetype. "
-        "Be specific about what you see in the code that is problematic. JSON only."
+        "Based on the ACTUAL CODE above, compare to 3 well-known peer apps from the curated industry list. "
+        "Be specific about what you see in the code that is problematic and what concrete change to make. "
+        "JSON only — no prose, no markdown fences."
     )
     text = ""
     try:
