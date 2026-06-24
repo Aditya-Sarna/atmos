@@ -71,7 +71,7 @@ from atmos_engine import (
     deterministic_fallback,
     seed_test_cases,
 )
-from architecture_analyzer import analyze_repo
+from architecture_analyzer import analyze_repo, analyze_url_run
 from fuzz_generator import run_fuzz_suite, _classify_field, fuzz_flow_screens
 from github_runner import boot_repo, parse_github_url
 from github_pr import PatchSpec, open_pull_request
@@ -1693,7 +1693,7 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("screen tests failed: %s", exc)
 
-                # ── Phase 6: Architecture analysis (GitHub mode only) ───
+                # ── Phase 6: Architecture analysis (GitHub repo OR URL runtime) ─
                 arch_payload: Optional[dict[str, Any]] = None
                 if source == "github" and repo_root is not None:
                     await _emit(run_id, seq, "phase", {"phase": "architecture", "label": "Architecture Analysis"})
@@ -1704,6 +1704,17 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                             "message": f"Architecture score: {arch_payload['score']['overall']}/100 · {len(arch_payload['suggestions'])} suggestions"})
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("arch analysis failed: %s", exc)
+                elif pages:
+                    # URL-mode runtime audit — no source code, but we can still
+                    # observe the live surface and benchmark against industry peers.
+                    await _emit(run_id, seq, "phase", {"phase": "architecture", "label": "Architecture Analysis (URL mode)"})
+                    try:
+                        arch_payload = await analyze_url_run(pages, project["name"], app_type, project["url"])
+                        await _emit(run_id, seq, "architecture", arch_payload)
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"Architecture score (URL mode): {arch_payload['score']['overall']}/100 · {len(arch_payload['suggestions'])} suggestions"})
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("URL-mode arch analysis failed: %s", exc)
 
                 # ── Phase 7: Test cases derived from actual pages ───────
                 await _emit(run_id, seq, "phase", {"phase": "test_cases", "label": "Live Test Case Playback"})
@@ -1892,6 +1903,8 @@ async def start_swarm(run_id: str, body: SwarmStartBody, user: User = Depends(cu
         from dataclasses import asdict
         from enum import Enum
 
+        captured_video_url: dict[str, Optional[str]] = {"url": None}
+
         def _coerce(value):
             """Recursively convert enums (LoadProfile, UserMode, …) to their .value so BSON can store them."""
             if isinstance(value, Enum):
@@ -1908,6 +1921,9 @@ async def start_swarm(run_id: str, body: SwarmStartBody, user: User = Depends(cu
             payload["ts"] = datetime.now(timezone.utc).isoformat()
             payload["kind"] = "swarm_event"
             payload["event"] = kind
+            # Capture the recorded video URL from the first virtual user, if any.
+            if kind == "user_session_video" and payload.get("video_url") and not captured_video_url["url"]:
+                captured_video_url["url"] = payload["video_url"]
             await db.run_events.insert_one(dict(payload))
             await _publish(run_id, {k: v for k, v in payload.items() if k != "_id"})
 
@@ -1933,6 +1949,8 @@ async def start_swarm(run_id: str, body: SwarmStartBody, user: User = Depends(cu
                     md["profile"] = body.profile
                     md["journey"] = body.journey
                     md["target_users"] = target_users
+                    if captured_video_url["url"]:
+                        md["video_url"] = captured_video_url["url"]
                     await db.test_runs.update_one({"run_id": run_id}, {"$set": {"swarm_summary": md}})
                     await emit("swarm_completed", md)
                 finally:

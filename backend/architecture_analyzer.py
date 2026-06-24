@@ -612,4 +612,233 @@ async def analyze_repo(repo_root: Path, project_name: str, archetype: str) -> di
         "score": score,
         "suggestions": suggestions,
         "peer_comparison": peer,
+        "mode": "repo",
+    }
+
+
+# ---------------------------------------------------------------------------
+# URL-mode runtime audit (no repo access — derives signals from live pages)
+# ---------------------------------------------------------------------------
+
+def _score_url_mode(pages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Heuristic architecture score derived purely from runtime page captures."""
+    if not pages:
+        return {
+            "overall": 0,
+            "axes": {"discoverability": 0, "completeness": 0, "speed_hint": 0, "complexity": 0},
+        }
+
+    # Discoverability: how many distinct routes did the crawl reach.
+    n_routes = len({p.get("route") or p.get("url") for p in pages})
+    discoverability = min(100, int(n_routes * 12))
+
+    # Completeness: average # of buttons / inputs / forms per page surfaced by the crawl.
+    interactive_counts = [
+        len((p.get("buttons") or [])) + len((p.get("inputs") or []))
+        for p in pages
+    ]
+    avg_interactive = sum(interactive_counts) / max(1, len(interactive_counts))
+    completeness = min(100, int(avg_interactive * 4))
+
+    # Speed hint: faster crawls tend to imply lighter pages.
+    # If the engine recorded per-page timings, use them; otherwise score a flat 60.
+    timings = [p.get("ms_to_dom_ready") for p in pages if isinstance(p.get("ms_to_dom_ready"), (int, float))]
+    if timings:
+        avg = sum(timings) / len(timings)
+        speed_hint = max(0, min(100, int(100 - (avg / 50))))
+    else:
+        speed_hint = 60
+
+    # Complexity: more inputs per page = more places to break.
+    complexity = min(100, int(avg_interactive * 6))
+
+    overall = round((discoverability * 0.35 + completeness * 0.25 + speed_hint * 0.25 + (100 - complexity) * 0.15))
+    return {
+        "overall": overall,
+        "axes": {
+            "discoverability": discoverability,
+            "completeness": completeness,
+            "speed_hint": speed_hint,
+            "complexity": complexity,
+        },
+    }
+
+
+def _deterministic_url_suggestions(pages: list[dict[str, Any]], app_type: str) -> list[dict[str, Any]]:
+    """Always-on architecture findings for URL-mode runs.
+
+    These don't depend on the LLM — they fire from concrete signals visible
+    in the crawl (missing alt text, forms without labels, etc.).
+    """
+    out: list[dict[str, Any]] = []
+
+    # 1. Coverage / route map
+    routes = sorted({p.get("route") or p.get("url") for p in pages})
+    out.append({
+        "id": f"url_coverage_{uuid.uuid4().hex[:6]}",
+        "title": "Discoverable surface",
+        "severity": "info",
+        "category": "Coverage",
+        "rationale": f"Atmos reached {len(routes)} distinct route(s): {', '.join(routes[:6]) + ('…' if len(routes) > 6 else '')}.",
+        "patch_kind": "manual",
+    })
+
+    # 2. Missing form labels (common a11y / arch smell)
+    unlabeled = []
+    for p in pages:
+        for inp in (p.get("inputs") or []):
+            label = (inp.get("label") or "").strip()
+            if not label and inp.get("type") not in {"hidden", "submit", "button"}:
+                unlabeled.append({"page": p.get("route") or p.get("url"), "name": inp.get("name") or inp.get("placeholder") or "(unnamed)"})
+    if unlabeled:
+        sample = "; ".join(f"{u['page']}::{u['name']}" for u in unlabeled[:4])
+        out.append({
+            "id": f"url_a11y_{uuid.uuid4().hex[:6]}",
+            "title": f"{len(unlabeled)} form input(s) lack accessible labels",
+            "severity": "medium",
+            "category": "Accessibility",
+            "rationale": f"Sample: {sample}. Screen readers can't announce these fields.",
+            "patch_kind": "css",
+            "patch_css": "label { display: block; } input:not([aria-label]):not([id]) + * { outline: 2px solid #ff3b30 !important; }",
+        })
+
+    # 3. Heavy click depth = navigation problem
+    deepest = max((len(p.get("path_from_root") or []) for p in pages), default=0)
+    if deepest > 5:
+        out.append({
+            "id": f"url_depth_{uuid.uuid4().hex[:6]}",
+            "title": f"Some routes are {deepest} clicks deep from the landing page",
+            "severity": "low",
+            "category": "Information architecture",
+            "rationale": f"Industry rule of thumb is ≤3 clicks. {app_type} apps should expose key paths in the primary nav.",
+            "patch_kind": "manual",
+        })
+
+    return out
+
+
+async def _url_mode_peer_comparison(
+    project_name: str,
+    archetype: str,
+    pages: list[dict[str, Any]],
+    score: dict[str, Any],
+) -> dict[str, Any]:
+    """LLM peer comparison for URL-mode runs (no repo code — uses page summaries)."""
+    try:
+        from emergentintegrations.llm.chat import (  # type: ignore
+            LlmChat, UserMessage, TextDelta, StreamDone,
+        )
+    except Exception:  # noqa: BLE001
+        return {"peers": [], "summary": "", "next_3_moves": []}
+
+    api_key = os.environ.get("EMERGENT_LLM_KEY", "")
+    if not api_key:
+        return {"peers": [], "summary": "", "next_3_moves": []}
+
+    # Reuse the curated peer hint table from llm_peer_comparison.
+    archetype_peers: dict[str, list[str]] = {
+        "ecommerce": ["Shopify Storefront", "Amazon", "Allbirds", "Glossier"],
+        "finance": ["Stripe Dashboard", "Plaid", "Wise", "Robinhood"],
+        "fintech": ["Stripe Dashboard", "Plaid", "Wise", "Robinhood"],
+        "payments": ["Stripe Dashboard", "Razorpay", "Adyen", "Square"],
+        "saas": ["Linear", "Notion", "Vercel Dashboard", "Stripe Dashboard"],
+        "productivity": ["Notion", "Linear", "Height", "Coda"],
+        "social": ["Twitter/X", "Threads", "Mastodon", "Reddit"],
+        "messaging": ["Slack", "Discord", "Signal", "Telegram Web"],
+        "media": ["Spotify Web", "Netflix", "YouTube", "Apple Music Web"],
+        "developer-tool": ["GitHub", "Vercel", "Linear", "Sentry"],
+        "developer_tool": ["GitHub", "Vercel", "Linear", "Sentry"],
+        "dashboard": ["Linear", "Stripe Dashboard", "Vercel Dashboard", "Datadog"],
+        "landing": ["Apple.com", "Linear.app", "Stripe.com", "Vercel.com"],
+        "marketing": ["Apple.com", "Linear.app", "Stripe.com", "Vercel.com"],
+        "ai": ["OpenAI Platform", "Anthropic Console", "Replicate", "HuggingFace"],
+        "education": ["Khan Academy", "Coursera", "Brilliant", "Duolingo"],
+        "blog": ["Medium", "Substack", "Ghost", "Mirror"],
+        "docs": ["Notion", "GitBook", "Mintlify", "Docusaurus"],
+    }
+    arch_key = (archetype or "").lower().strip().replace(" ", "_")
+    suggested_peers = archetype_peers.get(arch_key) or archetype_peers.get(arch_key.split("_")[0], [])
+    peer_hint = (
+        f"Archetype '{archetype}' → curated industry peers: {', '.join(suggested_peers)}."
+        if suggested_peers else
+        "Pick 3 industry leaders in this archetype with overlapping features."
+    )
+
+    chat = LlmChat(
+        api_key=api_key,
+        session_id=f"arch_url_{uuid.uuid4().hex[:6]}",
+        system_message=(
+            "You are an enterprise software architect reviewing a LIVE web app — you have its "
+            "page map and observable behaviour but NOT the source code. Compare to 3 well-known "
+            "industry peers in the same archetype. For each peer give:\n"
+            "  - name\n"
+            "  - what_they_do_better: 1-2 sentence concrete UX/architecture strength the user-facing app misses\n"
+            "  - what_to_copy: an actionable change phrased for a product+eng team (no folder names)\n"
+            "Return ONLY JSON: { summary, peers:[{name, what_they_do_better, what_to_copy}], next_3_moves:[string,string,string] }"
+        ),
+    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+
+    page_lines = [
+        f"- {p.get('route') or p.get('url')}: title='{(p.get('title') or '').strip()[:80]}', "
+        f"buttons={len(p.get('buttons') or [])}, inputs={len(p.get('inputs') or [])}"
+        for p in pages[:25]
+    ]
+    prompt = (
+        f"Project: {project_name}\nArchetype: {archetype}\n"
+        f"Runtime score: {score['overall']}/100 (axes: {score['axes']})\n\n"
+        f"Page map ({len(pages)} pages):\n" + "\n".join(page_lines) + "\n\n"
+        f"{peer_hint}\n\n"
+        "Based on this RUNTIME-OBSERVED map, compare to 3 well-known peer apps and propose the "
+        "next 3 concrete moves. JSON only — no prose, no markdown fences."
+    )
+    text = ""
+    try:
+        async for ev in chat.stream_message(UserMessage(text=prompt)):
+            if isinstance(ev, TextDelta):
+                text += ev.content
+            elif isinstance(ev, StreamDone):
+                break
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.lower().startswith("json"):
+                text = text[4:]
+        return json.loads(text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("URL-mode peer comparison failed: %s", exc)
+        return {"peers": [], "summary": "", "next_3_moves": []}
+
+
+async def analyze_url_run(
+    pages: list[dict[str, Any]],
+    project_name: str,
+    archetype: str,
+    project_url: str,
+) -> dict[str, Any]:
+    """Architecture audit for URL-source runs.
+
+    Uses runtime signals from the crawl (page count, interactive surface, depth,
+    a11y signals) plus an LLM peer comparison to produce a meaningful Architecture
+    tab even when there's no source code to scan.
+    """
+    score = _score_url_mode(pages)
+    suggestions = _deterministic_url_suggestions(pages, archetype)
+    peer = await _url_mode_peer_comparison(project_name, archetype, pages, score)
+    return {
+        "scan": {
+            "mode": "url",
+            "project_url": project_url,
+            "pages_observed": len(pages),
+            "routes": sorted({p.get("route") or p.get("url") for p in pages}),
+            "frameworks": [],
+            "languages": {},
+            "layers": [],
+            "has_typescript": False,
+            "has_tests": False,
+            "has_state_layer": False,
+        },
+        "score": score,
+        "suggestions": suggestions,
+        "peer_comparison": peer,
+        "mode": "url",
     }

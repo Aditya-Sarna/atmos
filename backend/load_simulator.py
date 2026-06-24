@@ -10,9 +10,11 @@ Handles:
 """
 
 import asyncio
+import os
 import time
 import statistics
 from datetime import datetime
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -343,8 +345,19 @@ class LoadSimulator:
         ctx: Optional[BrowserContext] = None
         page: Optional[Page] = None
         
+        # Record a video for the FIRST user of each swarm so the UI has
+        # something to play in the Swarm tab. Recording every user would
+        # blow up disk + memory.
+        record_video = str(session.session_id).startswith("user_0_") or str(session.session_id).startswith("soak_user_0_")
+        ctx_kwargs: dict = {}
+        if record_video:
+            video_dir = Path(os.environ.get("ATMOS_VIDEOS_DIR", "/app/backend/videos"))
+            video_dir.mkdir(parents=True, exist_ok=True)
+            ctx_kwargs["record_video_dir"] = str(video_dir)
+            ctx_kwargs["record_video_size"] = {"width": 1280, "height": 720}
+
         try:
-            ctx = await self.browser.new_context()
+            ctx = await self.browser.new_context(**ctx_kwargs)
             page = await ctx.new_page()
             
             # Get journey steps based on template
@@ -370,10 +383,39 @@ class LoadSimulator:
             session.error_message = str(e)
             session.steps_failed += 1
         finally:
+            # Persist the recorded video URL on the session so we can return it.
+            video_url: Optional[str] = None
+            try:
+                if record_video and page is not None:
+                    video_obj = page.video
+                    await page.close()
+                    page = None
+                    if video_obj:
+                        raw_video_path = await video_obj.path()
+                        if raw_video_path and Path(raw_video_path).exists():
+                            vname = f"{self.run_id}_swarm_{session.session_id}.webm"
+                            target = Path(os.environ.get("ATMOS_VIDEOS_DIR", "/app/backend/videos")) / vname
+                            Path(raw_video_path).rename(target)
+                            video_url = f"/api/screens/{vname}"
+            except Exception:  # noqa: BLE001
+                video_url = None
             if page:
-                await page.close()
+                try:
+                    await page.close()
+                except Exception:  # noqa: BLE001
+                    pass
             if ctx:
-                await ctx.close()
+                try:
+                    await ctx.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            if video_url:
+                self.emit("user_session_video", {"session_id": session.session_id, "video_url": video_url})
+                # Also stash on the session so the engine layer can surface it.
+                try:
+                    setattr(session, "video_url", video_url)
+                except Exception:  # noqa: BLE001
+                    pass
     
     async def _continuous_user_journey(
         self,

@@ -278,6 +278,25 @@ export default function SwarmPanel({ runId }) {
             </div>
           )}
 
+          {/* Recorded session video (first virtual user) */}
+          {summary?.video_url && (
+            <div className="mt-5" data-testid="swarm-video-block">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-2">Sample virtual-user session</div>
+              <video
+                controls
+                preload="metadata"
+                playsInline
+                muted
+                className="w-full rounded-xl bg-black"
+                src={`${process.env.REACT_APP_BACKEND_URL}${summary.video_url}`}
+                data-testid="swarm-video"
+              />
+              <div className="text-[11px] text-[#86868B] mt-1.5">
+                Recording of the first user in this swarm — same browser context all the others used.
+              </div>
+            </div>
+          )}
+
           {summary?.status === "completed" && (
             <div className="mt-5 flex flex-wrap gap-2">
               <button

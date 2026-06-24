@@ -723,7 +723,7 @@ export default function RunMonitor() {
             <TabsContent value="architecture" className="space-y-3 mt-4" data-testid="tab-architecture-content">
               {!architecture ? (
                 <div className="card-elev p-10 text-center text-sm text-[#86868B]">
-                  Architecture analysis is only available when the project is connected via GitHub.
+                  Architecture analysis runs in the final phase of every test run. It will appear here once the run reaches the Architecture phase.
                 </div>
               ) : (
                 <ArchitecturePanel arch={architecture} runId={runId} />
@@ -938,7 +938,7 @@ function FuzzCaseList({ cases }) {
                   <table className="w-full text-xs">
                     <tbody>
                       {f.items.map((c) => (
-                        <tr key={c.id} className="border-t border-black/5">
+                        <tr key={c.id} className="border-t border-black/5 align-top">
                           <td className="px-3 py-2 align-top w-20">
                             <span className="text-[10px] uppercase tracking-wider" style={{ color: statusColor[c.status] || "#86868B" }}>
                               {c.status || "…"}
@@ -956,14 +956,25 @@ function FuzzCaseList({ cases }) {
                           <td className="px-3 py-2 align-top text-[#86868B]">
                             {c.explanation || c.actual || ""}
                           </td>
-                          {/* per-fuzz screenshot thumbnail */}
-                          {c.screenshot_url && (
-                            <td className="px-3 py-2 align-top w-12">
+                          {/* Evidence: prefer video, fall back to screenshot */}
+                          <td className="px-3 py-2 align-top w-28">
+                            {c.video_url ? (
+                              <video
+                                controls
+                                preload="metadata"
+                                muted
+                                playsInline
+                                className="w-24 rounded bg-black"
+                                src={`${BACKEND_URL_LOCAL}${c.video_url}`}
+                                data-testid={`fuzz-video-${c.id}`}
+                              />
+                            ) : c.screenshot_url ? (
                               <button
                                 type="button"
                                 onClick={() => setExpandedScreenshot(c.screenshot_url)}
-                                className="block w-10 h-7 rounded overflow-hidden border border-black/10 hover:opacity-80 transition-opacity"
+                                className="block w-24 h-14 rounded overflow-hidden border border-black/10 hover:opacity-80 transition-opacity"
                                 title="View screenshot"
+                                data-testid={`fuzz-screenshot-${c.id}`}
                               >
                                 <img
                                   src={`${BACKEND_URL_LOCAL}${c.screenshot_url}`}
@@ -971,8 +982,10 @@ function FuzzCaseList({ cases }) {
                                   className="w-full h-full object-cover"
                                 />
                               </button>
-                            </td>
-                          )}
+                            ) : (
+                              <span className="text-[10px] text-[#86868B]">no evidence</span>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

@@ -92,11 +92,11 @@ Return ONLY a minified JSON object with shape:
       "severity": "critical"|"high"|"medium"|"low",
       "title": "Plain-English title <80 chars",
       "cause": "Likely cause <140 chars",
-      "patch_css": "Safe, additive CSS that fixes this visibly in a static screenshot when injected",
+      "patch_css": "Safe, additive CSS that fixes this visibly in a static screenshot when injected. CRITICAL: selectors MUST be GENERIC (e.g. 'button', 'a', 'h1', 'input[type=text]', 'form', '[role=button]') so they actually match the page DOM. DO NOT invent class names. If you don't know the exact selector, use the tag + an attribute that appears in the page text (e.g. 'button:has-text(\"Continue\")') or a structural selector like 'main > section:first-child h2'. Each rule must be visually obvious (bg color, outline, font-size, padding ≥8px change).",
       "patch_explanation": "1 sentence explaining what the patch does",
       "alternatives": [
-        {"label": "<6 words", "summary": "<25 words", "tradeoff": "<20 words", "patch_css": "alt CSS"},
-        {"label": "<6 words", "summary": "<25 words", "tradeoff": "<20 words", "patch_css": "alt CSS"}
+        {"label": "<6 words", "summary": "<25 words", "tradeoff": "<20 words", "patch_css": "alt CSS (same selector rules as above)"},
+        {"label": "<6 words", "summary": "<25 words", "tradeoff": "<20 words", "patch_css": "alt CSS (same selector rules as above)"}
       ]
     }
     ... aim for 6-10 issues spread across the supplied pages ...
