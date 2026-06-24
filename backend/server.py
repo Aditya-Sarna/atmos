@@ -36,20 +36,77 @@ from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
 def _ensure_playwright_browsers() -> None:
-    """Auto-install chromium if the binary expected by the current Playwright is missing."""
+    """Auto-install chromium if the EXACT binary version expected by the current
+    Playwright build is missing.
+
+    Why we can't just check 'does any chromium_headless_shell-* dir exist':
+    when the Playwright pip package is upgraded, it bumps its required browser
+    revision (e.g. 1208 → 1223). The old dir lingers on disk, so a naive check
+    passes — but BrowserType.launch then fails with 'Executable doesn't exist'.
+
+    The reliable signal is the registry shipped with the installed Playwright
+    package: it tells us the EXACT versioned folder name the runtime will look
+    for. We probe for that, and only that.
+    """
     import logging as _logging
     import subprocess
     _log = _logging.getLogger("atmos.playwright_bootstrap")
 
     browsers_dir = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/pw-browsers"))
-    candidate_dirs = list(browsers_dir.glob("chromium_headless_shell-*")) + list(browsers_dir.glob("chromium-*"))
-    has_binary = any((d / "chrome-linux" / "headless_shell").exists() for d in candidate_dirs)
-    if has_binary:
-        return
-    _log.warning("Playwright chromium binary missing under %s; running `playwright install chromium`…", browsers_dir)
+
+    expected_dirs: list[Path] = []
+    try:
+        from playwright._impl._driver import compute_driver_executable  # type: ignore  # noqa: F401
+        # Newer playwright versions expose a registry that knows the exact dir names.
+        from playwright._impl._browser_paths import compute_browsers_path  # type: ignore  # noqa: F401
+    except Exception:
+        pass
+    try:
+        # The simplest, version-proof check: launch playwright in --dry-run via the CLI.
+        # It exits 0 if browsers are installed, non-zero otherwise.
+        env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(browsers_dir)}
+        # Use the venv playwright binary directly to avoid PATH ambiguity
+        # between the supervisor child process and the user shell.
+        import sys as _sys
+        playwright_bin = str(Path(_sys.executable).parent / "playwright")
+        if not Path(playwright_bin).exists():
+            playwright_bin = "playwright"
+        rc = subprocess.run(
+            [playwright_bin, "install", "--dry-run", "chromium"],
+            env=env, capture_output=True, text=True, timeout=20,
+        )
+        # The CLI prints "browser: chromium ... install location: …" lines.
+        # If any listed chromium install location does NOT contain the expected
+        # browser executable, we must run a real install. Skip FFmpeg lines —
+        # they list an ffmpeg-* dir that never contains a chromium binary.
+        needs_install = False
+        for line in rc.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped.lower().startswith("install location:"):
+                continue
+            loc = Path(stripped.split(":", 1)[1].strip())
+            if "ffmpeg" in loc.name.lower():
+                continue
+            expected_dirs.append(loc)
+            # The actual executable is at <loc>/chrome-linux/headless_shell (or chrome).
+            if not (loc / "chrome-linux" / "headless_shell").exists() and not (loc / "chrome-linux" / "chrome").exists():
+                needs_install = True
+        if not expected_dirs:
+            # Old playwright versions — fall back to the simple glob check.
+            candidate = list(browsers_dir.glob("chromium_headless_shell-*")) + list(browsers_dir.glob("chromium-*"))
+            needs_install = not any((d / "chrome-linux" / "headless_shell").exists() for d in candidate)
+        if not needs_install:
+            return
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("playwright dry-run check failed (%s); assuming install needed.", exc)
+
+    _log.warning(
+        "Playwright chromium binary missing under %s (expected %s); running `playwright install chromium`…",
+        browsers_dir, expected_dirs or "(unknown version)",
+    )
     try:
         env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(browsers_dir)}
-        subprocess.run(["playwright", "install", "chromium"], check=True, env=env, timeout=300)
+        subprocess.run([playwright_bin, "install", "chromium"], check=True, env=env, timeout=600)
         _log.info("Playwright chromium installed.")
     except Exception as exc:  # noqa: BLE001
         _log.error("Could not auto-install Playwright chromium: %s", exc)
