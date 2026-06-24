@@ -1238,7 +1238,7 @@ async def llm_analyze_app(project: dict[str, Any], command: str, pages: list[dic
         api_key=api_key,
         session_id=f"atmos_{project['project_id']}_{uuid.uuid4().hex[:6]}",
         system_message=SYSTEM_PROMPT,
-    ).with_model("gemini", "gemini-3.5-flash")
+    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
 
     # Build prompt: list pages with URL + viewport for each attached image.
     images: list[ImageContent] = []
@@ -1334,7 +1334,7 @@ async def llm_analyze_page(project: dict[str, Any], page: dict[str, Any]) -> dic
         api_key=api_key,
         session_id=f"atmos_page_{project['project_id']}_{uuid.uuid4().hex[:6]}",
         system_message=SYSTEM_PROMPT,
-    ).with_model("gemini", "gemini-3.5-flash")
+    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
 
     # ── Vision attempt ───────────────────────────────────────────────
     if images:
@@ -1370,7 +1370,7 @@ async def llm_analyze_page(project: dict[str, Any], page: dict[str, Any]) -> dic
             "infer realistic UX, accessibility, and functional issues for that type of screen. "
             "Return JSON only, exactly per the schema provided."
         ),
-    ).with_model("gemini", "gemini-3.5-flash")
+    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
 
     route = page.get("route") or page["url"]
     text_prompt = (

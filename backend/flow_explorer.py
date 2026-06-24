@@ -39,13 +39,13 @@ logger = logging.getLogger("atmos.flow")
 # Tunables
 # ---------------------------------------------------------------------------
 
-MAX_FLOW_STEPS = 24
-MAX_HUB_BRANCHES = 20
-MAX_SCREENS = 30
+MAX_FLOW_STEPS = 80
+MAX_HUB_BRANCHES = 30
+MAX_SCREENS = 80
 SETTLE_MS = 600
-DEFAULT_PIN = "1357"
-VLM_MAX_ACTIONS_PER_STEP = 3
-VLM_STAGNATION_LIMIT = 3
+DEFAULT_PIN = "135790"
+VLM_MAX_ACTIONS_PER_STEP = 6
+VLM_STAGNATION_LIMIT = 6
 
 FORWARD_CTAS = [
     "get started", "getting started", "get going", "create wallet",
@@ -242,6 +242,12 @@ async def _enter_pin_keypad(page: Page, memory: dict[str, str]) -> list[dict[str
         except Exception:
             break
     return steps
+
+
+def _is_pin_context(ctx: dict[str, Any]) -> bool:
+    """Heuristic: is the current screen a PIN / passcode entry surface?"""
+    hay = (str(ctx.get("heading", "")) + " " + str(ctx.get("body", ""))).lower()
+    return any(k in hay for k in ("pin", "passcode", "pass code", "secret code", "otp", "enter code"))
 
 
 def _pick_forward(buttons: list[dict[str, Any]], already: set[str]) -> Optional[dict[str, Any]]:
@@ -682,6 +688,22 @@ async def explore_app_flow(
 
             # Register current state
             await _register(page, path)
+
+            # ── Short-circuit: deterministic keypad PIN entry ──
+            # The VLM gets stuck on PIN screens because each digit click does
+            # not visibly change the screen until the *last* digit is entered,
+            # which trips the stagnation limit. Detect a keypad, tap all
+            # digits in one go, then let VLM evaluate the new screen.
+            kp_steps = await _enter_pin_keypad(page, memory)
+            if kp_steps:
+                path.extend(kp_steps)
+                await _settle(page)
+                await page.wait_for_timeout(SETTLE_MS)
+                vlm_stagnation = 0
+                # Re-register after PIN entry (page likely advanced).
+                await _register(page, path)
+                if _timed_out() or len(screens) >= MAX_SCREENS:
+                    break
             
             # Fetch elements and ask Gemini Flash
             elements = await _extract_elements_meta(page)
@@ -709,6 +731,7 @@ async def explore_app_flow(
             before_sig = await _signature(page)
             before_url = page.url
             progressed = False
+            on_pin = bool(context.get("has_keypad")) or _is_pin_context(context)
 
             for act in actions:
                 ok, step_taken = await _execute_vlm_action(page, act, elements)
@@ -727,6 +750,10 @@ async def explore_app_flow(
 
             if progressed:
                 vlm_stagnation = 0
+            elif on_pin:
+                # On a PIN screen, individual digit taps DO NOT change the
+                # signature — only the final digit does. Don't penalize.
+                vlm_stagnation = max(0, vlm_stagnation - 1)
             else:
                 vlm_stagnation += 1
                 if vlm_stagnation >= VLM_STAGNATION_LIMIT:
@@ -736,76 +763,17 @@ async def explore_app_flow(
     except Exception as exc:
         logger.warning("Gemini Visual VLM crawler loop encountered issue: %s", exc)
 
-    # ── Fallback to standard Single-Page BFS if VLM yielded too few screens ──
-    if len(screens) < 2 or vlm_success_actions == 0:
-        logger.info("VLM explore generated too few screens. Reverting to Fast BFS Crawler fallback...")
+    # ── Phase B+: ALWAYS run BFS fan-out as augmentation ───────────────
+    # Previous behaviour was "fall back to BFS only when VLM produced 0 screens".
+    # That left vast portions of multi-page apps undiscovered. Now we run the
+    # deterministic BFS *in addition to* the VLM, picking up any pages the
+    # VLM didn't reach.
+    if len(screens) < MAX_SCREENS:
+        logger.info("Augmenting with BFS fan-out (current screens: %d)", len(screens))
         try:
-            # Clear state and reset
-            screens.clear()
-            pages_out.clear()
-            by_sig.clear()
-            path = [{"op": "goto", "url": base_url}]
-            
-            await page.close()
-            page = await ctx.new_page()
-            await page.goto(base_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-            await _settle(page)
-            await page.wait_for_timeout(SETTLE_MS)
-
-            stuck = 0
-            for _step in range(max_steps):
-                if _timed_out():
-                    break
-                sig = await _signature(page)
-                await _register(page, path)
-                clicked = clicked_by_sig.setdefault(sig, set())
-                progressed = False
-
-                fill_steps = await _fill_screen(page, memory)
-                if fill_steps:
-                    path.extend(fill_steps)
-                    await page.wait_for_timeout(200)
-
-                kp_steps = await _enter_pin_keypad(page, memory)
-                if kp_steps:
-                    path.extend(kp_steps)
-                    await _settle(page)
-                    await page.wait_for_timeout(SETTLE_MS)
-                    if await _signature(page) != sig:
-                        progressed = True
-
-                if not progressed:
-                    buttons = await _enumerate_buttons(page)
-                    btn = _pick_forward(buttons, clicked)
-                    if btn:
-                        before = page.url
-                        ok = await _click_button_by_text(page, btn)
-                        clicked.add(btn["text"].strip().lower())
-                        if ok:
-                            path.append({"op":"click","text":btn.get("text",""),
-                                         "rect":btn.get("rect"),"role":btn.get("type")})
-                            await _settle(page)
-                            await page.wait_for_timeout(SETTLE_MS)
-                            if await _signature(page) != sig:
-                                progressed = True
-                                button_actions.append({
-                                    "label": btn.get("text",""), "from": before,
-                                    "to": page.url, "navigated": before != page.url,
-                                    "route": _pathname(page.url),
-                                })
-
-                if await _looks_like_hub(page) and len(screens) >= 2:
-                    hub_path = [dict(s) for s in path]
-                    break
-                if not progressed and not fill_steps:
-                    stuck += 1
-                    if stuck >= 2:
-                        break
-                else:
-                    stuck = 0
-
+            # Don't reset state — keep VLM-discovered screens and ADD to them.
             if not hub_path:
-                hub_path = [dict(s) for s in path]
+                hub_path = [dict(s) for s in path] if path else [{"op": "goto", "url": base_url}]
 
             # ── Phase B: single-page reuse fan-out ──────────────────────────────
             def _branch_score(b: dict[str, Any]) -> int:

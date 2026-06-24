@@ -547,7 +547,7 @@ async def llm_peer_comparison(project_name: str, archetype: str, scan: dict[str,
             "Return ONLY JSON of shape: "
             "{ summary: string, peers: [{name, what_they_do_better, what_to_copy}], next_3_moves: [string,string,string] }"
         ),
-    ).with_model("gemini", "gemini-3.5-flash")
+    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
 
     # Include actual code snippets from the largest / most problematic files
     repo_root = Path(scan.get("repo_root", "."))

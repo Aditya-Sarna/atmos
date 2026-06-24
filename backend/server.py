@@ -103,7 +103,7 @@ logger = logging.getLogger("atmos")
 # Hard stop for each fuzz sweep so one bad page cannot stall the whole run.
 FUZZ_URL_TIMEOUT_SECS = int(os.environ.get("ATMOS_FUZZ_URL_TIMEOUT_SECS", "45"))
 # Hard stop for flow exploration so auth-gated apps cannot stall the run.
-EXPLORE_TIMEOUT_SECS = int(os.environ.get("ATMOS_EXPLORE_TIMEOUT_SECS", "120"))
+EXPLORE_TIMEOUT_SECS = int(os.environ.get("ATMOS_EXPLORE_TIMEOUT_SECS", "420"))
 
 app = FastAPI(title="Atmos")
 api = APIRouter(prefix="/api")
@@ -677,7 +677,7 @@ async def _llm_plan(project: dict[str, Any], command: str) -> dict[str, Any]:
                 "focus_areas (5-8 short strings naming concrete UX surfaces or risks to probe). "
                 "Be specific to the product context. Respond with ONLY JSON, no prose."
             ),
-        ).with_model("gemini", "gemini-3.5-flash")
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
         msg = UserMessage(
             text=(
                 f"Target: {project['name']} at {project['url']}\n"
@@ -725,7 +725,7 @@ async def _llm_report(project: dict[str, Any], command: str, focus_areas: list[s
                 "critical_findings (array of 3-5 short sentences), recommendations (array of 5 imperative sentences, each <=15 words), "
                 "competitive_insight (1-2 sentences benchmarking vs industry leaders)."
             ),
-        ).with_model("gemini", "gemini-3.5-flash")
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
         prompt = (
             f"Target: {project['name']} ({project['url']})\n"
             f"App type: {project['app_type']}\n"
@@ -1491,17 +1491,32 @@ async def _execute_run(run_id: str, project: dict[str, Any], command: str) -> No
                 await _emit(run_id, seq, "log", {"level": "info",
                     "message": f"Crawled {len(pages)} page(s) · {len(button_actions)} button clicks. Per-page vision analysis next."})
 
-                # ── Phase 2: Per-page LLM vision analysis ───────────────
+                # ── Phase 2: Per-page LLM vision analysis (parallel batched) ──
                 await _emit(run_id, seq, "phase", {"phase": "per_page", "label": "Per-Page Vision Analysis"})
                 aggregated_issues: list[dict[str, Any]] = []
                 page_summaries: list[dict[str, Any]] = []
                 vp_labels = [v["label"] for v in REAL_VIEWPORTS]
-                for p in pages:
-                    try:
-                        page_analysis = await llm_analyze_page(project, p)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("per-page analysis failed for %s: %s", p["url"], exc)
-                        page_analysis = {"page_summary": "", "issues": []}
+
+                # Bound concurrency so we don't blast the LLM provider.
+                ANALYSIS_CONCURRENCY = int(os.environ.get("ATMOS_PAGE_ANALYSIS_CONCURRENCY", "4"))
+                PER_PAGE_TIMEOUT = int(os.environ.get("ATMOS_PER_PAGE_TIMEOUT_SECS", "75"))
+                sem = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
+
+                async def _analyze_one(p: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+                    async with sem:
+                        try:
+                            res = await asyncio.wait_for(llm_analyze_page(project, p), timeout=PER_PAGE_TIMEOUT)
+                            return p, res
+                        except asyncio.TimeoutError:
+                            logger.warning("per-page analysis TIMED OUT for %s after %ds", p["url"], PER_PAGE_TIMEOUT)
+                            return p, {"page_summary": "", "issues": []}
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("per-page analysis failed for %s: %s", p["url"], exc)
+                            return p, {"page_summary": "", "issues": []}
+
+                analyses = await asyncio.gather(*[_analyze_one(pg) for pg in pages])
+
+                for p, page_analysis in analyses:
                     summary_line = page_analysis.get("page_summary") or ""
                     page_summaries.append({"url": p["url"], "title": p["title"], "summary": summary_line})
                     if summary_line:
