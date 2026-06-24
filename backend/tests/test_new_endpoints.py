@@ -140,6 +140,19 @@ class TestPayments:
     def test_payment_paypal(self, run_id):
         self._run_provider(run_id, "paypal")
 
+    def test_payment_unknown_outcome_returns_400(self, run_id):
+        body = {
+            "provider": "stripe",
+            "concurrent": 2,
+            "outcomes": ["foo_bar"],
+            "amount_cents": 1000,
+        }
+        r = requests.post(f"{API}/runs/{run_id}/payment/simulate", headers=HEADERS, json=body, timeout=20)
+        assert r.status_code == 400, r.text
+        # Should mention allowed outcomes
+        txt = r.text.lower()
+        assert "success" in txt or "allowed" in txt or "outcome" in txt
+
 
 # ── GitHub token test endpoint ───────────────────────────────────────────
 class TestGithubTokenEndpoint:

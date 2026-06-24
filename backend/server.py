@@ -1875,9 +1875,20 @@ async def start_swarm(run_id: str, body: SwarmStartBody, user: User = Depends(cu
     async def _go():
         from load_simulator import LoadSimulator
         from dataclasses import asdict
+        from enum import Enum
+
+        def _coerce(value):
+            """Recursively convert enums (LoadProfile, UserMode, …) to their .value so BSON can store them."""
+            if isinstance(value, Enum):
+                return value.value
+            if isinstance(value, dict):
+                return {k: _coerce(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_coerce(v) for v in value]
+            return value
 
         async def emit(kind: str, payload: dict):
-            payload = dict(payload or {})
+            payload = _coerce(dict(payload or {}))
             payload["run_id"] = run_id
             payload["ts"] = datetime.now(timezone.utc).isoformat()
             payload["kind"] = "swarm_event"
@@ -1901,6 +1912,7 @@ async def start_swarm(run_id: str, body: SwarmStartBody, user: User = Depends(cu
                         duration_secs=duration,
                     )
                     md = asdict(metrics) if hasattr(metrics, "__dataclass_fields__") else dict(metrics)
+                    md = _coerce(md)
                     md["status"] = "completed"
                     md["completed_at"] = datetime.now(timezone.utc).isoformat()
                     md["profile"] = body.profile
@@ -1932,6 +1944,33 @@ class PaymentSimulateBody(BaseModel):
     amount_cents: int = 4999
 
 
+# Aliases mapping the UI's outcome strings → PaymentOutcome enum members.
+# This lets the API accept user-friendly outcome names without forcing the UI
+# to learn the lower-level enum vocabulary.
+_PAYMENT_OUTCOME_ALIASES: dict[str, str] = {
+    "success": "success",
+    "decline": "decline",
+    "decline_insufficient_funds": "insufficient_funds",
+    "insufficient_funds": "insufficient_funds",
+    "decline_lost_card": "decline",
+    "decline_expired_card": "expired_card",
+    "expired_card": "expired_card",
+    "incorrect_cvc": "incorrect_cvc",
+    "processing_error": "processing_error",
+    "timeout": "timeout",
+    "network_timeout": "timeout",
+    "network_failure": "network_failure",
+    "rate_limited": "rate_limited",
+    "duplicate": "duplicate_charge",
+    "duplicate_charge": "duplicate_charge",
+    # Outcomes the underlying enum doesn't model — synthesize them from
+    # 'decline' so we still produce a sensible non-success result.
+    "fraud": "decline",
+    "3ds_required": "decline",
+    "threeds_required": "decline",
+}
+
+
 @api.post("/runs/{run_id}/payment/simulate")
 async def simulate_payments(run_id: str, body: PaymentSimulateBody, user: User = Depends(current_user)):
     """Generate test payment payloads + simulate concurrent processing.
@@ -1954,37 +1993,74 @@ async def simulate_payments(run_id: str, body: PaymentSimulateBody, user: User =
 
     gen = TestPaymentGenerator(provider)
     requested = max(1, min(body.concurrent, 200))
-    outcomes_pool = [o for o in body.outcomes if o in [e.value for e in PaymentOutcome]] or ["success"]
+
+    # Resolve every requested outcome to its underlying PaymentOutcome member.
+    resolved: list[tuple[str, PaymentOutcome]] = []
+    unknown: list[str] = []
+    for label in body.outcomes or []:
+        key = (label or "").strip().lower()
+        enum_value = _PAYMENT_OUTCOME_ALIASES.get(key, key)
+        try:
+            resolved.append((label, PaymentOutcome(enum_value)))
+        except ValueError:
+            unknown.append(label)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown outcome(s): {unknown}. Allowed: {sorted(_PAYMENT_OUTCOME_ALIASES.keys())}",
+        )
+    if not resolved:
+        # Default to a balanced mix when caller didn't specify any.
+        resolved = [
+            ("success", PaymentOutcome.SUCCESS),
+            ("decline_insufficient_funds", PaymentOutcome.INSUFFICIENT_FUNDS),
+            ("expired_card", PaymentOutcome.EXPIRED_CARD),
+            ("timeout", PaymentOutcome.TIMEOUT),
+        ]
 
     async def _run_one(idx: int) -> dict:
-        outcome_name = outcomes_pool[idx % len(outcomes_pool)]
-        outcome = PaymentOutcome(outcome_name)
-        req = gen.generate_test_payment_request(outcome=outcome, amount_cents=body.amount_cents)
+        label, outcome = resolved[idx % len(resolved)]
+        try:
+            test_card = gen.generate_test_card(outcome)
+        except Exception:  # noqa: BLE001
+            test_card = ""
         # Simulate processing latency (provider-dependent).
         await asyncio.sleep(0.2 + (idx % 5) * 0.05)
+        is_success = outcome == PaymentOutcome.SUCCESS
         return {
-            "idx": idx, "provider": provider.value, "outcome": outcome.value,
+            "idx": idx,
+            "provider": provider.value,
+            "outcome": label,
+            "outcome_enum": outcome.value,
             "amount_cents": body.amount_cents,
-            "test_card": req.get("card_last4") or req.get("card", "")[-4:] if req.get("card") else "",
-            "result": "success" if outcome == PaymentOutcome.SUCCESS else "rejected",
-            "reason": outcome.value if outcome != PaymentOutcome.SUCCESS else None,
+            "test_card": (test_card or "")[-4:],
+            "result": "success" if is_success else "rejected",
+            "reason": None if is_success else outcome.value,
             "latency_ms": int(200 + (idx % 5) * 50),
         }
 
-    results = await asyncio.gather(*[_run_one(i) for i in range(requested)])
+    try:
+        results = await asyncio.gather(*[_run_one(i) for i in range(requested)])
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Payment simulation failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Payment simulation failed: {exc}")
     success = sum(1 for r in results if r["result"] == "success")
     by_outcome: dict[str, int] = {}
     for r in results:
         by_outcome[r["outcome"]] = by_outcome.get(r["outcome"], 0) + 1
 
+    sorted_latencies = sorted(r["latency_ms"] for r in results)
+    p50 = sorted_latencies[len(sorted_latencies) // 2] if sorted_latencies else 0
+    p95_idx = max(0, int(len(sorted_latencies) * 0.95) - 1)
+    p95 = sorted_latencies[p95_idx] if sorted_latencies else 0
     summary = {
         "provider": provider.value,
         "concurrent": requested,
         "success_count": success,
         "decline_count": requested - success,
         "success_rate": round(success / requested, 4) if requested else 0,
-        "p50_latency_ms": sorted([r["latency_ms"] for r in results])[len(results) // 2],
-        "p95_latency_ms": sorted([r["latency_ms"] for r in results])[max(0, int(len(results) * 0.95) - 1)],
+        "p50_latency_ms": p50,
+        "p95_latency_ms": p95,
         "by_outcome": by_outcome,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
