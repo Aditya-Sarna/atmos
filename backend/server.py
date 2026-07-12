@@ -1882,3 +1882,97 @@ async def _execute_run(
                     }},
                 )
                 await _emit(run_id, seq, "summary", summary)
+                await _emit(run_id, seq, "craft_score", {
+                    **summary["craft_score"],
+                    "gate": summary["craft_gate"],
+                    "baseline": summary["craft_baseline"],
+                })
+                await _publish(run_id, {"__type": "done", "status": "completed"})
+            finally:
+                if repo_ctx is not None:
+                    try:
+                        await repo_ctx.__aexit__(None, None, None)
+                    except Exception:  # noqa: BLE001
+                        pass
+                await browser.close()
+
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Run failed: %s", exc)
+        await _emit(run_id, seq, "log", {"level": "error", "message": f"Run aborted: {exc}"})
+        await db.test_runs.update_one(
+            {"run_id": run_id},
+            {"$set": {"status": "failed", "completed_at": datetime.now(timezone.utc).isoformat()}},
+        )
+        await _publish(run_id, {"__type": "done", "status": "failed"})
+
+
+# ----------------------------------------------------------------------------
+# Apply patches as PRs against the user's GitHub repo
+# ----------------------------------------------------------------------------
+
+
+class ApplyPatchBody(BaseModel):
+    kind: str                       # "issue" | "alt" | "architecture"
+    issue_id: Optional[str] = None  # for kind in ("issue", "alt")
+    alt_index: Optional[int] = None # for kind == "alt"
+    suggestion_id: Optional[str] = None  # for kind == "architecture"
+    base_branch: Optional[str] = None
+
+
+def _find_issue(summary: dict[str, Any], issue_id: str) -> Optional[dict[str, Any]]:
+    for i in summary.get("issues") or []:
+        if i.get("id") == issue_id:
+            return i
+    return None
+
+
+def _find_arch_suggestion(summary: dict[str, Any], suggestion_id: str) -> Optional[dict[str, Any]]:
+    arch = summary.get("architecture") or {}
+    for s in arch.get("suggestions") or []:
+        if s.get("id") == suggestion_id:
+            return s
+    return None
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Chaos Lab — architecture live stress + crash test (+ payment probes)
+# ────────────────────────────────────────────────────────────────────────
+
+from swarm_api import SwarmConfigBody, SwarmResultsResponse, ShipReportResponse
+
+
+class ChaosStartBody(BaseModel):
+    scope: str = "app"                 # app | pages
+    pages: Optional[list[str]] = None  # paths or absolute URLs
+    mode: str = "fixed"                # fixed | crash
+    users: int = 50                    # fixed concurrency OR crash start
+    max_users: int = 400               # crash ceiling
+    step_factor: float = 2.0
+    hold_secs: float = 10.0
+    include_payments: bool = False
+    payment_provider: str = "stripe"
+    break_success_rate: float = 0.85
+    break_p95_ms: float = 5000.0
+
+
+class ChaosTargetsBody(BaseModel):
+    scope: str = "pages"  # app | pages
+    pages: list[str] = Field(default_factory=list)
+    include_payments: bool = False
+    source: str = "ide"  # ide | ui
+
+
+class SwarmStartBody(BaseModel):
+    """Legacy — maps into Chaos Lab fixed mode."""
+    target_users: int = 50
+    profile: str = "burst"
+    journey: str = "generic"
+    duration_secs: int = 30
+
+
+async def _resolve_chaos_pages(project: dict[str, Any], body_pages: Optional[list[str]], scope: str, user_id: str) -> list[str]:
+    if scope == "pages" and body_pages:
+        return body_pages
+    # Prefer IDE-saved targets
+    saved = await db.chaos_targets.find_one({"project_id": project["project_id"]}, {"_id": 0})
+    if scope == "pages" and saved and saved.get("pages"):
