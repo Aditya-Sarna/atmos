@@ -202,3 +202,105 @@ def _category_label(vertical: str) -> str:
         "calendar": "scheduling / calendar",
         "crypto": "crypto / wallets",
         "devtool": "developer tools",
+        "generic": "this product category",
+    }.get(vertical, vertical.replace("-", " "))
+
+
+# ── 1) Keyword / research plan ───────────────────────────────────────────────
+
+
+def _heuristic_research_plan(project: dict[str, Any], vertical: str, blob: str) -> dict[str, Any]:
+    """Category + crawl-context keyword plan. Seed peers only; no hard-coded domain essays."""
+    name = project.get("name") or urlparse(project.get("url") or "").netloc or "product"
+    category = _category_label(vertical)
+    competitors = list(VERTICAL_COMPETITORS.get(vertical, VERTICAL_COMPETITORS["generic"]))
+    subs = list(VERTICAL_SUBS.get(vertical, VERTICAL_SUBS["generic"]))
+    terms = _extract_context_terms(blob, name)
+    t0, t1, t2 = (terms + ["onboarding", "pricing", "settings"])[:3]
+    c0, c1, c2 = (competitors + ["Notion", "Stripe", "Linear"])[:3]
+
+    framing = (
+        f"Research is scoped to {category} around {name}. "
+        f"Live crawl signals emphasize: {', '.join(terms[:5]) or 'core product flows'}. "
+        f"Peers ({', '.join(competitors[:4])}) often act as the de-facto design reference — "
+        f"teams ask what a shipped competitor did more than they run formal research."
+    )
+
+    questions = [
+        f"How do teams in {category} make design decisions, and what role do designers play?",
+        f"How do builders/operators start work on {name}-like products — what is the workflow?",
+        f"What resources exist for {category}, and where does the format fail users or AI-assisted workflows?",
+        f"What recurring pain points show up around {t0}, {t1}, and {t2}?",
+        f"Which {c0}/{c1} patterns is {name} measured against?",
+    ]
+
+    keywords = [
+        {"query": f'{name} missing OR "I wish" OR "please add" OR frustrating', "intent": "feature", "sources": ["reddit", "github", "google"], "why": f"Direct demand for {name}"},
+        {"query": f"{name} vs {c0} OR {c1}", "intent": "design_pattern", "sources": ["reddit", "google"], "why": "Competitive design copying"},
+        {"query": f'{c0} review "confusing" OR "broken" OR "hate" {t0}', "intent": "pain", "sources": ["play", "google", "reddit"], "why": f"Peer pain on {t0}"},
+        {"query": f"{c1} feature request {t1}", "intent": "feature", "sources": ["github", "reddit"], "why": f"Peer request volume for {t1}"},
+        {"query": f"{category} onboarding drop off OR confusing setup", "intent": "pain", "sources": ["reddit", "google"], "why": "Activation friction"},
+        {"query": f"{c0} vs {c1} UX {t2}", "intent": "design_pattern", "sources": ["reddit", "google"], "why": "De-facto pattern comparison"},
+        {"query": f"{name} alternative 2025 OR 2026", "intent": "feature", "sources": ["reddit", "google"], "why": "Switching intent"},
+        {"query": f'{category} "without a designer" OR copied UX OR "design system"', "intent": "workflow", "sources": ["reddit"], "why": "How design decisions get made"},
+        {"query": f'{t0} {t1} "how do I" {name}', "intent": "pain", "sources": ["reddit", "google"], "why": "Support-shaped language"},
+        {"query": f'{c2} pricing OR "too expensive" OR fees review', "intent": "pain", "sources": ["play", "reddit"], "why": "Monetization / trust friction"},
+    ]
+    for term in terms[:4]:
+        keywords.append({
+            "query": f"{term} UX OR confusing OR missing {c0}",
+            "intent": "pain",
+            "sources": ["reddit", "google", "github"],
+            "why": f"Live crawl term: {term}",
+        })
+
+    return {
+        "domain_framing": framing,
+        "research_questions": questions,
+        "vertical": vertical,
+        "category": category,
+        "competitors": competitors,
+        "subreddits": subs,
+        "context_terms": terms,
+        "keywords": keywords[:14],
+        "github_queries": [
+            f"{name} feature request is:issue",
+            f'{name} "would be nice" OR missing OR confusing is:issue',
+            f"{c0} {t0} is:issue",
+            f"{c1} enhancement label:enhancement",
+        ],
+        "play_queries": [f"{c} app" for c in competitors[:5]] + [name],
+        "google_queries": [
+            f'{c} app review "I wish" OR "please add" OR missing OR confusing'
+            for c in competitors[:4]
+        ] + [f"{name} review missing feature"],
+        "planner": "heuristic",
+        "planned_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def plan_research_keywords(
+    project: dict[str, Any],
+    *,
+    blob: str,
+    vertical: str,
+    db=None,
+    user_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """LLM plans product/category-specific keywords; heuristic uses crawl context."""
+    base = _heuristic_research_plan(project, vertical, blob)
+    if not db or not user_id:
+        return base
+
+    try:
+        from user_llm_proxy import user_llm_json
+
+        prompt = f"""Plan scraping keywords for THIS product only.
+
+Product / crawl context:
+{blob[:4500]}
+
+Declared category: {vertical} ({base.get('category')})
+Seed peers (replace if wrong): {base['competitors']}
+Seed subreddits (replace if wrong): {base['subreddits']}
+Context terms from crawl: {base.get('context_terms')}
