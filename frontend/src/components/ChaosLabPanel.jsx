@@ -92,3 +92,97 @@ function ArchitectureDiagram({ nodes = [], edges = [] }) {
               {n.health}
               {n.latency_p95_ms ? ` · ${Math.round(n.latency_p95_ms)}ms` : ""}
             </text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+export default function ChaosLabPanel({ runId, projectId, pages = [] }) {
+  const [scope, setScope] = useState("app");
+  const [selected, setSelected] = useState([]);
+  const [mode, setMode] = useState("crash");
+  const [users, setUsers] = useState(25);
+  const [maxUsers, setMaxUsers] = useState(200);
+  const [includePayments, setIncludePayments] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [summary, setSummary] = useState(null);
+  const [events, setEvents] = useState([]);
+  const [liveNodes, setLiveNodes] = useState([]);
+  const [liveEdges, setLiveEdges] = useState([]);
+  const pollRef = useRef(null);
+
+  useEffect(() => {
+    if (pages?.length && selected.length === 0) {
+      setSelected(pages.slice(0, 4).map((p) => p.url || p));
+    }
+  }, [pages]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await getChaosLive(runId);
+        if (cancelled) return;
+        const s = r.data.summary || {};
+        setSummary(s);
+        setEvents(r.data.events || []);
+        const arch = s.architecture || s.live?.architecture;
+        if (arch?.nodes) setLiveNodes(arch.nodes);
+        if (arch?.edges) setLiveEdges(arch.edges);
+        const archEv = [...(r.data.events || [])].reverse().find((e) => e.event === "chaos_architecture" || e.type === "chaos_architecture");
+        if (archEv?.nodes) setLiveNodes(archEv.nodes);
+        if (s.status === "completed" || s.status === "failed") {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
+          setBusy(false);
+        }
+      } catch { /* ignore */ }
+    };
+    if (busy && !pollRef.current) {
+      tick();
+      pollRef.current = setInterval(tick, 1200);
+    }
+    return () => {
+      cancelled = true;
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [busy, runId]);
+
+  const togglePage = (url) => {
+    setSelected((prev) => (prev.includes(url) ? prev.filter((u) => u !== url) : [...prev, url]));
+  };
+
+  const handleStart = async () => {
+    try {
+      setBusy(true);
+      setSummary(null);
+      setEvents([]);
+      if (projectId) {
+        await setChaosTargets(projectId, {
+          scope,
+          pages: scope === "pages" ? selected : [],
+          include_payments: includePayments,
+          source: "ui",
+        }).catch(() => {});
+      }
+      await startChaos(runId, {
+        scope,
+        pages: scope === "pages" ? selected : undefined,
+        mode,
+        users,
+        max_users: maxUsers,
+        hold_secs: 10,
+        include_payments: includePayments,
+        payment_provider: "stripe",
+        step_factor: 2,
+      });
+      toast.success(mode === "crash" ? "Crash test started — ramping until break" : `Fixed load · ${users} users`);
+    } catch (e) {
+      setBusy(false);
+      toast.error("Chaos Lab failed to start", { description: e?.response?.data?.detail || e.message });
+    }
