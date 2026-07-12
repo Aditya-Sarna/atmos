@@ -599,3 +599,40 @@ async def analyze_repo(repo_root: Path, project_name: str, archetype: str, db=No
 
 def _score_url_mode(pages: list[dict[str, Any]]) -> dict[str, Any]:
     """Heuristic architecture score derived purely from runtime page captures."""
+    if not pages:
+        return {
+            "overall": 0,
+            "axes": {"discoverability": 0, "completeness": 0, "speed_hint": 0, "complexity": 0},
+        }
+
+    # Discoverability: how many distinct routes did the crawl reach.
+    n_routes = len({p.get("route") or p.get("url") for p in pages})
+    discoverability = min(100, int(n_routes * 12))
+
+    # Completeness: average # of buttons / inputs / forms per page surfaced by the crawl.
+    interactive_counts = [
+        len((p.get("buttons") or [])) + len((p.get("inputs") or []))
+        for p in pages
+    ]
+    avg_interactive = sum(interactive_counts) / max(1, len(interactive_counts))
+    completeness = min(100, int(avg_interactive * 4))
+
+    # Speed hint: faster crawls tend to imply lighter pages.
+    # If the engine recorded per-page timings, use them; otherwise score a flat 60.
+    timings = [p.get("ms_to_dom_ready") for p in pages if isinstance(p.get("ms_to_dom_ready"), (int, float))]
+    if timings:
+        avg = sum(timings) / len(timings)
+        speed_hint = max(0, min(100, int(100 - (avg / 50))))
+    else:
+        speed_hint = 60
+
+    # Complexity: more inputs per page = more places to break.
+    complexity = min(100, int(avg_interactive * 6))
+
+    overall = round((discoverability * 0.35 + completeness * 0.25 + speed_hint * 0.25 + (100 - complexity) * 0.15))
+    return {
+        "overall": overall,
+        "axes": {
+            "discoverability": discoverability,
+            "completeness": completeness,
+            "speed_hint": speed_hint,
