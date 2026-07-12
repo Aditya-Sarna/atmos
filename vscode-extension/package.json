@@ -1,0 +1,77 @@
+{
+  "name": "atmos",
+  "displayName": "Atmos UX Agent",
+  "description": "Run Atmos on your IDE model quota (Copilot / Cursor / Claude) — no API key paste",
+  "version": "0.3.0",
+  "publisher": "atmos",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Testing", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "atmos.syncCodebase", "title": "Atmos: Sync codebase to backend" },
+      { "command": "atmos.generatePlan", "title": "Atmos: Generate test plan from selection" },
+      { "command": "atmos.startRun", "title": "Atmos: Start test run" },
+      { "command": "atmos.selectChaosTargets", "title": "Atmos: Select pages / entire app for Chaos Lab" },
+      { "command": "atmos.startCrashTest", "title": "Atmos: Start crash test (ramp until break)" },
+      { "command": "atmos.startChaosFixed", "title": "Atmos: Start fixed load test" },
+      { "command": "atmos.connectIdeLlm", "title": "Atmos: Connect IDE models (start quota bridge)" },
+      { "command": "atmos.selectModel", "title": "Atmos: Select default IDE model" },
+      { "command": "atmos.selectVisionModel", "title": "Atmos: Select vision IDE model" },
+      { "command": "atmos.showIdeLlmStatus", "title": "Atmos: Show IDE LLM bridge status" },
+      { "command": "atmos.openDashboard", "title": "Atmos: Open dashboard" }
+    ],
+    "configuration": {
+      "title": "Atmos",
+      "properties": {
+        "atmos.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Atmos backend URL"
+        },
+        "atmos.projectId": {
+          "type": "string",
+          "default": "",
+          "description": "Atmos project ID"
+        },
+        "atmos.useNativeIdeLlm": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run Atmos LLM calls on your IDE model entitlement via vscode.lm (no API key)"
+        },
+        "atmos.preferredModel": {
+          "type": "string",
+          "default": "",
+          "description": "Preferred IDE model id/family (e.g. copilot/gpt-4o or claude-sonnet). Leave empty to be prompted."
+        },
+        "atmos.preferredVisionModel": {
+          "type": "string",
+          "default": "",
+          "description": "Preferred model for screenshot/vision jobs. Falls back to preferredModel."
+        },
+        "atmos.promptForModelOnConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "When connecting, prompt to pick a model if none is saved"
+        },
+        "atmos.ide": {
+          "type": "string",
+          "enum": ["auto", "cursor", "vscode", "claude"],
+          "default": "auto",
+          "description": "Which IDE you are in (auto-detects Cursor vs VS Code)"
+        },
+        "atmos.pageUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Local dev URL to test (e.g. http://localhost:3000)"
+        },
+        "atmos.enableDopamineMax": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable dopamine-maximization UX suggestions"
+        }
+      }
+    }
+  }
+}
