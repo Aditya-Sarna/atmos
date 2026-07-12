@@ -176,3 +176,92 @@ async def ensure_reference_cache(db, app_type: str = "generic") -> list[dict[str
     cache_key = f"refs_{app_type}"
     cached = await db.ui_references.find_one({"cache_key": cache_key}, {"_id": 0})
     if cached and cached.get("references"):
+        return cached["references"]
+
+    categories = ISSUE_TO_CATEGORIES.get("UX", ["navigation"]) + [app_type]
+    mobbin = await scrape_mobbin_patterns(categories[0], limit=6)
+    pinterest = await scrape_pinterest_patterns(f"{app_type} app ui ux design", limit=6)
+    combined = mobbin + pinterest
+    # Always merge seed data for reliability
+    for seed in SEED_REFERENCES:
+        if app_type in seed.get("tags", []) or "generic" in seed.get("tags", []):
+            s = dict(seed)
+            s["ref_id"] = s.get("ref_id") or f"ref_{uuid.uuid4().hex[:8]}"
+            combined.append(s)
+
+    # Dedupe by pattern text
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for r in combined:
+        key = (r.get("pattern") or "")[:80].lower()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(r)
+
+    await db.ui_references.update_one(
+        {"cache_key": cache_key},
+        {"$set": {
+            "cache_key": cache_key,
+            "app_type": app_type,
+            "references": unique[:20],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True,
+    )
+    return unique[:20]
+
+
+def _match_references(issue: dict[str, Any], references: list[dict[str, Any]], limit: int = 3) -> list[dict[str, Any]]:
+    category = issue.get("category", "UX")
+    title = (issue.get("title") or "").lower()
+    cats = ISSUE_TO_CATEGORIES.get(category, ["generic"])
+    scored: list[tuple[int, dict[str, Any]]] = []
+
+    for ref in references:
+        score = 0
+        ref_cat = ref.get("category", "")
+        ref_tags = ref.get("tags") or []
+        if ref_cat in cats:
+            score += 3
+        for kw in ["checkout", "button", "contrast", "touch", "nav", "form", "mobile", "cta"]:
+            if kw in title and kw in (ref.get("pattern") or "").lower():
+                score += 2
+        if "generic" in ref_tags:
+            score += 1
+        if score > 0:
+            scored.append((score, ref))
+
+    scored.sort(key=lambda x: -x[0])
+    return [r for _, r in scored[:limit]]
+
+
+async def enrich_issues_with_references(
+    db,
+    issues: list[dict[str, Any]],
+    app_type: str = "generic",
+) -> list[dict[str, Any]]:
+    """Attach Mobbin/Pinterest reference suggestions to each issue."""
+    refs = await ensure_reference_cache(db, app_type)
+    enriched = []
+    for issue in issues:
+        matches = _match_references(issue, refs)
+        issue_copy = dict(issue)
+        issue_copy["ui_references"] = [
+            {
+                "ref_id": m.get("ref_id"),
+                "source": m.get("source"),
+                "app": m.get("app"),
+                "pattern": m.get("pattern"),
+                "image_url": m.get("image_url"),
+                "category": m.get("category"),
+            }
+            for m in matches
+        ]
+        enriched.append(issue_copy)
+    return enriched
+
+
+async def get_references_for_query(db, query: str, app_type: str = "generic", limit: int = 10) -> list[dict[str, Any]]:
+    mobbin = await scrape_mobbin_patterns(query, limit=limit // 2)
+    pinterest = await scrape_pinterest_patterns(f"{query} ui design", limit=limit // 2)
+    return (mobbin + pinterest)[:limit]
