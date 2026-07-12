@@ -113,3 +113,118 @@ async def _audit_design_tokens(page: Page) -> dict[str, Any]:
 
 
 def _evaluate_against_theme(tokens: dict[str, Any], theme_key: str, app_type: str) -> list[dict[str, Any]]:
+    theme = CONTEXT_THEMES.get(theme_key, CONTEXT_THEMES["generic"])
+    issues: list[dict[str, Any]] = []
+
+    min_body = theme["fonts"]["min_body_px"]
+    if tokens.get("body_font_px", 16) < min_body:
+        issues.append({
+            "category": "Typography",
+            "severity": "high" if theme_key == "elderly-care" else "medium",
+            "title": f"Body font {tokens['body_font_px']:.0f}px below {theme['label']} minimum ({min_body}px)",
+            "detail": f"For {app_type} contexts, users expect ≥{min_body}px body text for readability.",
+            "fundamental": "typography_scale",
+            "recommendation": f"Increase base font-size to {min_body}px; use a clear hierarchy (1.25 ratio).",
+        })
+
+    if len(tokens.get("unique_fonts") or []) > 3:
+        issues.append({
+            "category": "Typography",
+            "severity": "medium",
+            "title": f"{len(tokens['unique_fonts'])} font families — exceeds 2–3 typeface rule",
+            "detail": "Multiple competing fonts reduce visual cohesion.",
+            "fundamental": "typography_consistency",
+            "recommendation": "Limit to one display + one body font family.",
+        })
+
+    min_pad = theme["spacing"]["section_padding_min_px"]
+    if tokens.get("avg_padding_px", 0) < min_pad * 0.5 and min_pad >= 24:
+        issues.append({
+            "category": "Spacing",
+            "severity": "medium",
+            "title": "Insufficient vertical padding — cramped layout",
+            "detail": f"Avg padding {tokens.get('avg_padding_px')}px; {theme['label']} expects ≥{min_pad}px sections.",
+            "fundamental": "whitespace",
+            "recommendation": f"Use {theme['spacing']['grid_base_px']}px grid; increase section padding to {min_pad}px+.",
+        })
+
+    accent_colors = [c for c in (tokens.get("unique_colors") or []) if "rgb" in c.lower() or "#" in c.lower()]
+    if len(accent_colors) > theme["colors"]["max_accent_count"] + 4:
+        issues.append({
+            "category": "Color",
+            "severity": "medium",
+            "title": "Color palette too fragmented for context",
+            "detail": f"{theme['label']}: use ≤{theme['colors']['max_accent_count']} accent colors. Found {len(accent_colors)} distinct colors.",
+            "fundamental": "color_discipline",
+            "recommendation": theme["description"],
+        })
+
+    if theme_key == "finance" and tokens.get("body_font_px", 16) >= 18:
+        issues.append({
+            "category": "Typography",
+            "severity": "low",
+            "title": "Large body type may feel consumer-grade for fintech",
+            "detail": "Finance apps often use 15–16px dense UI to signal professionalism.",
+            "fundamental": "context_fit",
+            "recommendation": "Consider tighter type scale matching Stripe/Wise patterns.",
+        })
+
+    if theme_key == "elderly-care" and tokens.get("avg_margin_px", 0) < 12:
+        issues.append({
+            "category": "Spacing",
+            "severity": "high",
+            "title": "Margins too tight for elderly-care context",
+            "detail": "Generous margins reduce mis-taps and cognitive load for older users.",
+            "fundamental": "context_fit",
+            "recommendation": "Increase block margins to 24–32px; single-column layouts preferred.",
+        })
+
+    return issues
+
+
+async def analyze_design_theory(
+    browser: Browser,
+    target_url: str,
+    run_id: str,
+    app_type: str,
+    *,
+    theme_override: Optional[str] = None,
+    on_progress: Optional[ProgressFn] = None,
+) -> dict[str, Any]:
+    theme_key = theme_override or APP_TYPE_TO_THEME.get(app_type, "generic")
+    theme = CONTEXT_THEMES.get(theme_key, CONTEXT_THEMES["generic"])
+    vp = VIEWPORTS[-1]
+    ctx = await _new_context(browser, vp)
+    page = await ctx.new_page()
+    all_issues: list[dict[str, Any]] = []
+
+    try:
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        await _settle(page)
+        tokens = await _audit_design_tokens(page)
+        issues = _evaluate_against_theme(tokens, theme_key, app_type)
+
+        shot_name = f"{run_id}_{_safe_name('design_theory')}.png"
+        await page.screenshot(path=str(SCREENSHOTS_DIR / shot_name), full_page=False)
+
+        for iss in issues:
+            iss["screenshot_url"] = f"/api/screens/{shot_name}"
+            iss["theme"] = theme_key
+            all_issues.append(iss)
+            if on_progress:
+                await on_progress({"type": "design_theory_issue", **iss})
+
+        result = {
+            "theme_key": theme_key,
+            "theme_label": theme["label"],
+            "theme_description": theme["description"],
+            "tokens": tokens,
+            "issues": all_issues,
+            "issue_count": len(all_issues),
+            "score": max(35, 100 - len(all_issues) * 12),
+        }
+        if on_progress:
+            await on_progress({"type": "design_theory", **result})
+        return result
+    finally:
+        await ctx.close()
