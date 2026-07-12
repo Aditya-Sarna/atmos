@@ -304,3 +304,105 @@ Declared category: {vertical} ({base.get('category')})
 Seed peers (replace if wrong): {base['competitors']}
 Seed subreddits (replace if wrong): {base['subreddits']}
 Context terms from crawl: {base.get('context_terms')}
+
+QUALITY BAR = research depth (archetypes, workflows, design-decision patterns, resource format gaps, numbered pains).
+That bar is structural — do NOT inject Bitcoin/Lightning/crypto content unless this product is actually in that category.
+
+Return STRICT JSON:
+{{
+  "domain_framing": "2-4 sentences on structural dynamics of THIS product's category",
+  "research_questions": ["4-6 deep questions scoped to this product/category"],
+  "competitors": ["5-8 real peers for THIS product"],
+  "subreddits": ["4-8 relevant subs without r/"],
+  "keywords": [
+    {{
+      "query": "specific search using product name, peers, and crawl jargon",
+      "intent": "pain|feature|workflow|archetype|resource|design_pattern",
+      "sources": ["reddit","github","play","google"],
+      "why": "why this query matters for this product"
+    }}
+  ],
+  "github_queries": ["3-6 GitHub search strings"],
+  "play_queries": ["relevant Play app names"],
+  "google_queries": ["review search strings"]
+}}
+
+Rules: 8-14 specific keywords; never unrelated vertical jargon; never generic-only queries like bare "feature request".
+"""
+        planned = await user_llm_json(
+            db, user_id, prompt,
+            system="Plan high-signal, product-specific research queries. JSON only.",
+            session_id="demand-plan",
+        )
+        if not isinstance(planned, dict) or not planned.get("keywords"):
+            return base
+        merged = {**base, **{k: planned[k] for k in planned if planned[k]}, "planner": "llm"}
+        merged["keywords"] = (planned.get("keywords") or base["keywords"])[:14]
+        merged["category"] = base.get("category")
+        merged["context_terms"] = base.get("context_terms")
+        return merged
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("keyword planner LLM failed: %s", exc)
+        return base
+
+
+# ── 2) Scrapers ──────────────────────────────────────────────────────────────
+
+
+def _evidence(
+    *,
+    source: str,
+    text: str,
+    url: Optional[str] = None,
+    weight: int = 1,
+    meta: Optional[dict] = None,
+) -> dict[str, Any]:
+    text = (text or "").strip()
+    return {
+        "source": source,
+        "text": text[:1200],
+        "snippet": text[:220].replace("\n", " "),
+        "url": url,
+        "weight": max(1, min(25, weight)),
+        "feature_ids": [fid for fid, pat in FEATURE_PATTERNS if pat.search(text)],
+        **(meta or {}),
+    }
+
+
+async def _reddit_comments(permalink: str, limit: int = 8) -> list[str]:
+    if not permalink:
+        return []
+    path = permalink if permalink.endswith(".json") else permalink.rstrip("/") + ".json"
+    if not path.startswith("http"):
+        path = "https://www.reddit.com" + path
+    try:
+        data = await _fetch(path, as_json=True)
+        if not isinstance(data, list) or len(data) < 2:
+            return []
+        comments = []
+        for child in ((data[1].get("data") or {}).get("children") or [])[:limit]:
+            body = ((child.get("data") or {}).get("body")) or ""
+            if len(body) > 40:
+                comments.append(body)
+        return comments
+    except Exception:  # noqa: BLE001
+        return []
+
+
+async def scrape_reddit_research(plan: dict[str, Any], limit_posts: int = 35) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    subs = plan.get("subreddits") or VERTICAL_SUBS["generic"]
+    kw_items = [k for k in (plan.get("keywords") or []) if "reddit" in (k.get("sources") or ["reddit"])]
+    queries = [k["query"] for k in kw_items] or [k["query"] for k in plan.get("keywords") or []]
+
+    for sub in subs[:5]:
+        for q in queries[:6]:
+            url = (
+                f"https://www.reddit.com/r/{sub}/search.json"
+                f"?q={quote_plus(q)}&restrict_sr=1&sort=relevance&t=year&limit=12"
+            )
+            try:
+                data = await _fetch(url, as_json=True)
+                children = (data.get("data") or {}).get("children") or []
+                for child in children:
+                    post = child.get("data") or {}
