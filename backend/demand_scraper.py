@@ -814,3 +814,105 @@ Resources often exist; the format fails. Narrative help centers and long docs ar
             f"{i}. **{t['label']}** (weight {t.get('demand_score')}, sources {t.get('sources')})\n"
             f"   - Signal: “{ex}”\n"
             f"   - Implication for {name}: treat as a category gap in {category}, not a one-off complaint."
+        )
+    pain_points_md = f"## Common pain points — {category}\n\n" + "\n\n".join(pain_lines)
+
+    design_md = f"""## How design decisions get made ({category})
+
+Shipped products are the primary source of design guidance. When teams stall, the default question is usually what {competitors[0] if competitors else 'a category leader'} did — not a formal design critique.
+
+Small teams often skip a formal design phase: ship → public feedback → iterate. Dedicated designers are scarce; domain literacy is as much a barrier as budget. When designers join late, early journeys get reworked.
+
+For {name}, peer set to watch: {', '.join(competitors) or 'infer from scrape'}.
+"""
+
+    proposed = []
+    named = [x for x in themes if x["tier"] in ("S", "A") and not str(x.get("theme_id", "")).startswith("theme:")]
+    if len(named) < 3:
+        named = named + [x for x in themes if x["tier"] in ("S", "A") and x not in named]
+    for t in named[:4]:
+        slug = re.sub(r"[^a-z0-9]+", "-", t["label"].lower()).strip("-")[:48] or "feature"
+        ex = t.get("examples") or []
+        quotes_md = "\n".join(f"- “{e.get('snippet')}” ({e.get('source')})" for e in ex[:3]) or "- (limited quotes)"
+        md = f"""# {t['label']}
+
+## Problem
+In {category}, **{t['label']}** repeatedly surfaces for {name} and peers (tier **{t['tier']}**, weight **{t['demand_score']}**).
+
+## Evidence
+{quotes_md}
+
+Sources: {json.dumps(t.get('sources') or {})}
+
+## Who it serves
+- Users comparing {name} to {', '.join(competitors[:3]) or 'category peers'}
+- Operators filing GitHub/Reddit pain when the journey breaks
+- Teams without a dedicated designer copying peer patterns
+
+## Proposed solution
+Ship a first-class **{t['label']}** experience for {name} with peer-familiar defaults, explicit empty/error states, and recoverable next actions.
+
+### Decision rules
+1. Prefer patterns users already know from {competitors[0] if competitors else 'category leaders'} for high-stakes steps.
+2. Pair UI copy with a checklist of constraints / acceptance criteria.
+3. Every ambiguous state needs a single recommended next action.
+
+### Anti-patterns
+- Narrative help articles as the only fix
+- Silent failures
+- Novel interaction on critical paths without a peer precedent
+
+## Success metrics
+- Drop in threads matching this theme within 60 days
+- Task completion on the critical path covering this theme
+- Fewer “how do I…” support contacts
+
+## Why now
+Among observed signals this ranks tier {t['tier']} for {category}. Gaps become public quickly via Reddit, GitHub, and store reviews.
+"""
+        proposed.append({"slug": slug, "title": t["label"], "tier": t["tier"], "markdown": md})
+
+    # If scrape was thin, still propose from top research questions / context terms
+    if len(proposed) < 2 and terms:
+        term = terms[0]
+        proposed.append({
+            "slug": re.sub(r"[^a-z0-9]+", "-", term)[:40],
+            "title": f"Clarify {term} journey",
+            "tier": "A",
+            "markdown": f"""# Clarify {term} journey
+
+## Problem
+Crawl context for {name} highlights **{term}**, but live public evidence is thin or fragmented. That usually means the journey is either underspecified in-product or undocumented in peer-comparable language.
+
+## Proposed solution
+Instrument and redesign the {term} path with peer-comparable UX ({', '.join(competitors[:3])}), decision rules, and anti-patterns specific to {category}.
+
+## Why now
+Keyword planning prioritized {term} from the live app context — validate with users before it becomes a review cluster.
+""",
+        })
+
+    return {
+        "executive_summary": exec_sum.strip(),
+        "archetypes_md": archetypes_md.strip(),
+        "workflows_md": workflows_md.strip(),
+        "resources_and_gaps_md": resources_md.strip(),
+        "pain_points_md": pain_points_md.strip(),
+        "design_decisions_md": design_md.strip(),
+        "proposed_features": proposed[:5],
+        "synthesizer": "heuristic",
+    }
+
+
+def _write_markdown_pack(
+    run_id: Optional[str],
+    product: str,
+    plan: dict[str, Any],
+    synthesis: dict[str, Any],
+) -> dict[str, Any]:
+    rid = run_id or uuid.uuid4().hex[:10]
+    out_dir = REPORTS_DIR / f"demand_{rid}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    features_dir = out_dir / "proposed_features"
+    features_dir.mkdir(exist_ok=True)
+
