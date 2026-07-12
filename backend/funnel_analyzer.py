@@ -194,3 +194,102 @@ async def analyze_conversion_funnel(
     browser: Browser,
     target_url: str,
     pages: list[dict[str, Any]],
+    button_actions: list[dict[str, Any]],
+    app_type: str,
+    run_id: str,
+    on_progress: Optional[ProgressFn] = None,
+) -> dict[str, Any]:
+    """Measure real click path to conversion goal; record annotated funnel video."""
+    bench = INDUSTRY_FUNNEL_BENCHMARKS.get(app_type, INDUSTRY_FUNNEL_BENCHMARKS["generic"])
+    goal_keywords = bench["goal_keywords"]
+    competitors = bench["competitors"]
+    industry_avg = bench["industry_avg"]
+
+    graph = _build_action_graph(pages, button_actions)
+    start = _normalize_url(pages[0]["url"] if pages else target_url)
+    path = _find_shortest_path(graph, start, goal_keywords)
+
+    your_clicks = len(path) if path else max(3, len(button_actions[:6]))
+    if not path and button_actions:
+        your_clicks = min(len(button_actions), 8)
+
+    slug = _safe_name("funnel")
+    video_name = f"{run_id}_{slug}.webm"
+    vp = VIEWPORTS[-1]  # Desktop for funnel video
+
+    ctx = await _new_context(browser, vp, record_video=True, record_dir=SCREENSHOTS_DIR)
+    page = await ctx.new_page()
+    funnel_steps: list[dict[str, Any]] = []
+    video_url: Optional[str] = None
+    comparison_msg = f"{your_clicks} clicks vs industry avg {industry_avg}"
+    verdict = "ahead" if your_clicks < industry_avg else "behind" if your_clicks > industry_avg else "on_par"
+
+    try:
+        if path:
+            funnel_steps = await _replay_funnel_path(page, start, path)
+        else:
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            await _settle(page)
+            await _show_funnel_step(page, 1, "Exploring — no direct conversion path found", 0)
+            funnel_steps = [{"step": 1, "action": "Home page only", "url": target_url}]
+
+        verdict = "ahead" if your_clicks < industry_avg else "behind" if your_clicks > industry_avg else "on_par"
+        comparison_msg = (
+            f"{your_clicks} clicks to goal vs industry avg {industry_avg}"
+            if verdict != "on_par"
+            else f"{your_clicks} clicks — matches industry average"
+        )
+        await page.evaluate(
+            """([clicks, avg, msg]) => {
+              let o = document.getElementById('atmos-funnel-overlay');
+              if (o) o.innerHTML = '<div class="step">Funnel result</div><div class="action">' + msg + '</div>';
+              let c = document.getElementById('atmos-funnel-counter');
+              if (c) c.textContent = clicks + ' vs ' + avg + ' industry';
+            }""",
+            [your_clicks, industry_avg, comparison_msg],
+        )
+        await page.wait_for_timeout(1500)
+
+        await page.close()
+        video_path = await page.video.path() if page.video else None
+        video_url = f"/api/screens/{video_name}" if video_path and Path(video_path).exists() else None
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("funnel video failed: %s", exc)
+        video_url = None
+        try:
+            await page.close()
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        await ctx.close()
+
+    benchmark_rows = []
+    for competitor, clicks in competitors.items():
+        row = {
+            "competitor": competitor,
+            "clicks_to_primary": clicks,
+            "your_clicks": your_clicks,
+            "verdict": "ahead" if your_clicks < clicks else "behind" if your_clicks > clicks else "on_par",
+            "delta": your_clicks - clicks,
+        }
+        benchmark_rows.append(row)
+        if on_progress:
+            await on_progress({"type": "benchmark", **row})
+
+    result = {
+        "your_clicks": your_clicks,
+        "industry_avg": industry_avg,
+        "goal_keywords": goal_keywords,
+        "path": [{"label": e.get("label"), "from": e.get("from"), "to": e.get("to")} for e in (path or [])],
+        "funnel_steps": funnel_steps,
+        "video_url": video_url,
+        "verdict": verdict,
+        "comparison": comparison_msg,
+        "benchmarks": benchmark_rows,
+    }
+
+    if on_progress:
+        await on_progress({"type": "funnel_analysis", **result})
+
+    return result
