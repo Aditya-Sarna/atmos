@@ -406,3 +406,105 @@ async def scrape_reddit_research(plan: dict[str, Any], limit_posts: int = 35) ->
                 children = (data.get("data") or {}).get("children") or []
                 for child in children:
                     post = child.get("data") or {}
+                    title = post.get("title") or ""
+                    body = post.get("selftext") or ""
+                    blob = f"{title}\n{body}"
+                    score = int(post.get("score") or 0)
+                    comments_n = int(post.get("num_comments") or 0)
+                    weight = max(2, min(22, score // 8 + comments_n // 4 + 2))
+                    permalink = post.get("permalink") or ""
+                    evidence.append(_evidence(
+                        source="reddit",
+                        text=blob,
+                        url=f"https://reddit.com{permalink}",
+                        weight=weight,
+                        meta={
+                            "subreddit": sub,
+                            "query": q,
+                            "score": score,
+                            "comments": comments_n,
+                            "intent": next((k.get("intent") for k in kw_items if k.get("query") == q), None),
+                        },
+                    ))
+                    # Deep comments on high-signal threads
+                    if score >= 15 or comments_n >= 10:
+                        for cbody in await _reddit_comments(permalink, limit=6):
+                            evidence.append(_evidence(
+                                source="reddit_comment",
+                                text=cbody,
+                                url=f"https://reddit.com{permalink}",
+                                weight=max(1, min(10, weight // 2)),
+                                meta={"subreddit": sub, "query": q, "parent_score": score},
+                            ))
+                    if len(evidence) >= limit_posts * 4:
+                        return evidence
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("reddit research failed %s %s: %s", sub, q, exc)
+    return evidence
+
+
+async def scrape_github_research(plan: dict[str, Any], project: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    queries = list(plan.get("github_queries") or [])
+    owner, repo = project.get("github_owner"), project.get("github_repo")
+    if owner and repo:
+        queries = [
+            f"repo:{owner}/{repo} is:issue label:enhancement",
+            f"repo:{owner}/{repo} is:issue \"feature request\" OR missing OR confusing",
+        ] + queries
+
+    headers = dict(HEADERS)
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    for q in queries[:5]:
+        url = f"https://api.github.com/search/issues?q={quote_plus(q)}&sort=reactions&order=desc&per_page=25"
+        try:
+            async with httpx.AsyncClient(timeout=20, headers=headers, follow_redirects=True) as client:
+                r = await client.get(url)
+                if r.status_code >= 400:
+                    continue
+                data = r.json()
+            for item in data.get("items") or []:
+                blob = f"{item.get('title', '')}\n{item.get('body') or ''}"
+                reactions = ((item.get("reactions") or {}).get("total_count")) or 0
+                comments = int(item.get("comments") or 0)
+                weight = max(2, min(20, reactions * 2 + comments // 2 + 2))
+                evidence.append(_evidence(
+                    source="github",
+                    text=blob,
+                    url=item.get("html_url"),
+                    weight=weight,
+                    meta={
+                        "reactions": reactions,
+                        "comments": comments,
+                        "query": q,
+                        "state": item.get("state"),
+                    },
+                ))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("github research failed: %s", exc)
+    return evidence
+
+
+async def scrape_play_and_google(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Play listing + Google review snippet scrape (best-effort; bots get blocked often)."""
+    evidence: list[dict[str, Any]] = []
+
+    for name in (plan.get("play_queries") or plan.get("competitors") or [])[:5]:
+        play_search = f"https://play.google.com/store/search?q={quote_plus(name)}&c=apps&hl=en"
+        try:
+            html = await _fetch(play_search)
+            # Extract app detail hrefs
+            ids = re.findall(r"id=([a-zA-Z0-9_.]+)", html or "")
+            # Prefer unique package ids
+            seen = []
+            for pid in ids:
+                if pid not in seen and "." in pid:
+                    seen.append(pid)
+                if len(seen) >= 2:
+                    break
+            for pid in seen[:2]:
+                detail = await _fetch(
+                    f"https://play.google.com/store/apps/details?id={quote_plus(pid)}&hl=en&gl=us"
