@@ -485,3 +485,51 @@ Interactive Elements Map:
 {elements_txt}
 
 Guidelines:
+- If we are on a PIN/Keypad screen: enter digits sequentially to unlock (e.g. click '1', '3', '5', '7').
+- If we see text fields: type placeholder values (User Name -> 'Atmos Tester', Email -> 'atmos.tester@example.com').
+- Look for next action to take (e.g. 'Get Started', 'Proceed', 'Dashboard' tabs).
+- On icon-only screens: rely on IconHint, Ctx, nav placement, and coordinates to open next screens.
+- Choose a short sequence of up to 3 actions that moves forward, not loops.
+- Avoid targets listed in Failed targets.
+
+Your response must be a single RAW minified JSON block matching this schema (JSON ONLY, no markdown):
+{{
+    "intent": "brief reason",
+    "done": false,
+    "actions": [
+        {{"action": "fill" | "click" | "press", "element_id": number_or_null, "selector": "", "text": "", "value": "", "key": ""}}
+    ]
+}}
+"""
+        from user_llm_proxy import user_llm_text
+        text = await user_llm_text(
+            db, user_id, prompt,
+            system="You are a multimodal web exploration agent. Respond in raw JSON only.",
+            images_b64=[b64_image],
+            purpose="flow_vlm",
+            expect_json=True,
+        )
+
+        # Squeeze out raw JSON
+        raw_json = text.strip()
+        if "```" in raw_json:
+            parts = raw_json.split("```")
+            raw_json = parts[1] if len(parts) >= 2 else raw_json
+            raw_json = raw_json.replace("json", "", 1).strip()
+
+        # Recover first JSON object if the model added any leading/trailing text.
+        first = raw_json.find("{")
+        last = raw_json.rfind("}")
+        if first >= 0 and last > first:
+            raw_json = raw_json[first:last + 1]
+        
+        parsed = json.loads(raw_json.strip())
+        logger.info("VLM chosen action: %s", parsed)
+        return parsed
+
+    except Exception as exc:
+        logger.warning("VLM decision call failed: %s", exc)
+        return None
+
+
+async def _execute_vlm_action(page: Page, action: dict[str, Any], elements: list[dict[str, Any]]) -> tuple[bool, Optional[dict[str, Any]]]:
