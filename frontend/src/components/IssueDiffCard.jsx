@@ -255,6 +255,12 @@ export default function IssueDiffCard({ issue, runId }) {
           )}
         </div>
       )}
-    </div>
-  );
-}
+
+      {/* Mobbin / Pinterest reference patterns */}
+      {issue.ui_references?.length > 0 && (
+        <div className="mt-5 pt-5 border-t border-black/5" data-testid={`issue-references-${issue.id}`}>
+          <div className="text-[10px] uppercase tracking-[0.18em] text-[#86868B] mb-3">
+            Industry references (Mobbin · Pinterest)
+          </div>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {issue.ui_references.map((ref) => (
