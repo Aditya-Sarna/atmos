@@ -2164,3 +2164,97 @@ async def start_swarm(run_id: str, body: SwarmStartBody, user: User = Depends(cu
 
 class PaymentSimulateBody(BaseModel):
     provider: str = "stripe"           # stripe | razorpay | paypal
+    concurrent: int = 25               # how many parallel payment attempts
+    outcomes: list[str] = ["success", "decline_insufficient_funds", "fraud", "3ds_required"]
+    amount_cents: int = 4999
+    pages: Optional[list[str]] = None  # optional payment/checkout pages
+
+
+# Aliases mapping the UI's outcome strings → PaymentOutcome enum members.
+# This lets the API accept user-friendly outcome names without forcing the UI
+# to learn the lower-level enum vocabulary.
+_PAYMENT_OUTCOME_ALIASES: dict[str, str] = {
+    "success": "success",
+    "decline": "decline",
+    "decline_insufficient_funds": "insufficient_funds",
+    "insufficient_funds": "insufficient_funds",
+    "decline_lost_card": "decline",
+    "decline_expired_card": "expired_card",
+    "expired_card": "expired_card",
+    "incorrect_cvc": "incorrect_cvc",
+    "processing_error": "processing_error",
+    "timeout": "timeout",
+    "network_timeout": "timeout",
+    "network_failure": "network_failure",
+    "rate_limited": "rate_limited",
+    "duplicate": "duplicate_charge",
+    "duplicate_charge": "duplicate_charge",
+    # Outcomes the underlying enum doesn't model — synthesize them from
+    # 'decline' so we still produce a sensible non-success result.
+    "fraud": "decline",
+    "3ds_required": "decline",
+    "threeds_required": "decline",
+}
+
+
+@api.post("/runs/{run_id}/payment/simulate")
+async def simulate_payments(run_id: str, body: PaymentSimulateBody, user: User = Depends(current_user)):
+    """Payment stress → Chaos Lab with live payment field probes (no sleep theater)."""
+    pages = body.pages
+    if not pages:
+        # Prefer checkout-looking pages from last graph
+        run = await require_run_for_user(db, run_id, user.user_id, permission="runs:start")
+        graph = (run.get("summary") or {}).get("app_graph") or []
+        pages = [
+            p["url"] for p in graph
+            if p.get("url") and any(k in p["url"].lower() for k in ("pay", "checkout", "billing", "cart"))
+        ] or None
+    chaos = ChaosStartBody(
+        scope="pages" if pages else "app",
+        pages=pages,
+        mode="crash" if body.concurrent >= 100 else "fixed",
+        users=max(10, min(body.concurrent, 200)),
+        max_users=max(body.concurrent * 2, 200),
+        hold_secs=12,
+        include_payments=True,
+        payment_provider=body.provider,
+    )
+    result = await start_chaos(run_id, chaos, user)
+    return {**result, "routed_to": "chaos_lab", "include_payments": True}
+
+
+@api.get("/runs/{run_id}/payment/results")
+async def get_payment_results(run_id: str, user: User = Depends(current_user)):
+    run = await require_run_for_user(db, run_id, user.user_id, permission="runs:read")
+    chaos = run.get("chaos_summary") or {}
+    return {
+        "summary": run.get("payment_summary") or chaos.get("payment_summary") or {},
+        "results": run.get("payment_results") or [],
+        "chaos": chaos,
+    }
+
+
+@api.get("/runs/{run_id}/swarm/live")
+async def get_swarm_live(run_id: str, user: User = Depends(current_user)):
+    """Poll live swarm progress for the UI."""
+    run = await require_run_for_user(db, run_id, user.user_id, permission="runs:read")
+    events = await db.run_events.find(
+        {"run_id": run_id, "kind": "swarm_event"},
+        {"_id": 0},
+    ).sort("ts", -1).to_list(200)
+    return {
+        "summary": run.get("swarm_summary") or {},
+        "events": list(reversed(events)),
+    }
+
+
+@api.post("/runs/{run_id}/swarm/config")
+async def configure_swarm_test(run_id: str, config: SwarmConfigBody, user: User = Depends(current_user)):
+    """Configure swarm load testing parameters."""
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    
+    # Store swarm configuration
+    await db.test_runs.update_one(
+        {"run_id": run_id},
