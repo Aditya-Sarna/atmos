@@ -12,6 +12,9 @@ import Dashboard from "@/pages/Dashboard";
 import NewRun from "@/pages/NewRun";
 import RunMonitor from "@/pages/RunMonitor";
 import Report from "@/pages/Report";
+import TeamSettings from "@/pages/TeamSettings";
+import ProjectTestCases from "@/pages/ProjectTestCases";
+import TestPlanEditor from "@/pages/TestPlanEditor";
 
 function AppRouter() {
   const location = useLocation();
@@ -55,6 +58,30 @@ function AppRouter() {
         element={
           <ProtectedRoute>
             <Report />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/team"
+        element={
+          <ProtectedRoute>
+            <TeamSettings />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/projects/:projectId/test-cases"
+        element={
+          <ProtectedRoute>
+            <ProjectTestCases />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/projects/:projectId/test-plans/:planId?"
+        element={
+          <ProtectedRoute>
+            <TestPlanEditor />
           </ProtectedRoute>
         }
       />
