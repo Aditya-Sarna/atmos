@@ -85,3 +85,85 @@ export default function Dashboard() {
             <h3 className="font-display text-2xl font-medium">No products yet</h3>
             <p className="mt-2 text-[#1D1D1F]/70 max-w-md mx-auto">
               Add a URL or GitHub repo. Atmos will produce a Craft Score you can trend and gate in CI.
+            </p>
+            <Link to="/dashboard/new">
+              <Button className="mt-6 rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white" data-testid="empty-cta">
+                Start your first run
+              </Button>
+            </Link>
+          </div>
+        )}
+
+        {items && items.length > 0 && (
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4" data-testid="projects-grid">
+            {items.map(({ project, last_run }, i) => {
+              const craft = project.latest_craft_score || last_run?.summary?.craft_score;
+              const gate = project.latest_craft_gate || last_run?.summary?.craft_gate;
+              const delta = last_run?.summary?.craft_baseline?.delta;
+              return (
+                <div
+                  key={project.project_id}
+                  className="card-elev p-6 hover:border-[#1D1D1F]/20 transition anim-slide-up"
+                  style={{ animationDelay: `${i * 40}ms` }}
+                  data-testid={`project-card-${project.project_id}`}
+                >
+                  <Link
+                    to={last_run ? `/runs/${last_run.run_id}/report` : `/dashboard/new?project=${project.project_id}`}
+                    className="block"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B]">
+                          {project.app_type || "product"}
+                        </div>
+                        <div className="mt-2 font-display text-xl font-medium">{project.name}</div>
+                        <div className="mt-1 text-sm text-[#86868B] truncate max-w-[260px]">
+                          {project.url}
+                        </div>
+                      </div>
+                      <ArrowUpRight className="h-4 w-4 text-[#86868B]" />
+                    </div>
+                    <div className="mt-5">
+                      <CraftBadge craft={craft} gate={gate} />
+                      {delta != null && (
+                        <div className={`mt-1 text-xs ${delta >= 0 ? "text-[#34C759]" : "text-[#FF3B30]"}`}>
+                          {delta >= 0 ? "+" : ""}{delta} vs baseline
+                        </div>
+                      )}
+                    </div>
+                    <div className="mt-4 flex items-center justify-between text-sm">
+                      {last_run ? (
+                        <>
+                          <span className="font-mono text-xs text-[#1D1D1F]/70">{last_run.command}</span>
+                          <span className="flex items-center gap-2">
+                            <span className={`w-1.5 h-1.5 rounded-full ${last_run.status === "completed" ? "bg-[#34C759]" : last_run.status === "failed" ? "bg-[#FF3B30]" : "bg-[#FF9500] live-dot"}`} />
+                            <span className="text-[#86868B]">{timeAgo(last_run.completed_at || last_run.started_at)}</span>
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-[#86868B]">No runs yet</span>
+                      )}
+                    </div>
+                  </Link>
+                  <Link
+                    to={`/projects/${project.project_id}/test-plans`}
+                    className="mt-2 inline-block text-xs text-[#0071E3] hover:underline mr-3"
+                  >
+                    Test plan →
+                  </Link>
+                  <Link
+                    to={`/projects/${project.project_id}/test-cases`}
+                    className="mt-2 inline-block text-xs text-[#0071E3] hover:underline"
+                    data-testid={`project-test-cases-${project.project_id}`}
+                  >
+                    Custom tests →
+                  </Link>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
