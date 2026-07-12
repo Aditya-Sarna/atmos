@@ -916,3 +916,105 @@ def _write_markdown_pack(
     features_dir = out_dir / "proposed_features"
     features_dir.mkdir(exist_ok=True)
 
+    files: dict[str, str] = {}
+
+    plan_md = f"""# Research plan — {product}
+
+_Generated {datetime.now(timezone.utc).isoformat()}_
+Planner: {plan.get('planner')} · Vertical: {plan.get('vertical')}
+
+## Domain framing
+{plan.get('domain_framing')}
+
+## Research questions
+{chr(10).join(f'{i}. {q}' for i, q in enumerate(plan.get('research_questions') or [], 1))}
+
+## Keywords
+| Query | Intent | Sources | Why |
+|-------|--------|---------|-----|
+{chr(10).join(
+    f"| `{k.get('query','').replace('|','/')}` | {k.get('intent')} | {', '.join(k.get('sources') or [])} | {k.get('why','')} |"
+    for k in (plan.get('keywords') or [])
+)}
+
+## Subreddits
+{', '.join(plan.get('subreddits') or [])}
+
+## Competitors
+{', '.join(plan.get('competitors') or [])}
+
+## GitHub queries
+{chr(10).join(f'- `{q}`' for q in (plan.get('github_queries') or []))}
+"""
+    (out_dir / "00_research_plan.md").write_text(plan_md, encoding="utf-8")
+    files["research_plan"] = str(out_dir / "00_research_plan.md")
+
+    docs = [
+        ("01_executive_and_archetypes.md", "# Executive view & archetypes\n\n"
+         + synthesis.get("executive_summary", "") + "\n\n" + synthesis.get("archetypes_md", "")),
+        ("02_workflows.md", synthesis.get("workflows_md") or "# Workflows\n"),
+        ("03_resources_and_gaps.md", synthesis.get("resources_and_gaps_md") or "# Resources\n"),
+        ("04_pain_points.md", synthesis.get("pain_points_md") or "# Pain points\n"),
+        ("05_design_decisions.md", synthesis.get("design_decisions_md") or "# Design decisions\n"),
+    ]
+    for fname, content in docs:
+        path = out_dir / fname
+        path.write_text(content.strip() + "\n", encoding="utf-8")
+        files[fname] = str(path)
+
+    feature_files = []
+    for feat in synthesis.get("proposed_features") or []:
+        slug = feat.get("slug") or "feature"
+        path = features_dir / f"{slug}.md"
+        path.write_text((feat.get("markdown") or f"# {feat.get('title')}\n") + "\n", encoding="utf-8")
+        feature_files.append({
+            "slug": slug,
+            "title": feat.get("title"),
+            "tier": feat.get("tier"),
+            "path": str(path),
+            "url_path": f"/api/reports/demand_{rid}/proposed_features/{slug}.md",
+            "markdown": feat.get("markdown"),
+        })
+        files[f"feature:{slug}"] = str(path)
+
+    index = {
+        "dir": str(out_dir),
+        "run_id": rid,
+        "files": files,
+        "urls": {
+            "plan": f"/api/reports/demand_{rid}/00_research_plan.md",
+            "archetypes": f"/api/reports/demand_{rid}/01_executive_and_archetypes.md",
+            "workflows": f"/api/reports/demand_{rid}/02_workflows.md",
+            "resources": f"/api/reports/demand_{rid}/03_resources_and_gaps.md",
+            "pain_points": f"/api/reports/demand_{rid}/04_pain_points.md",
+            "design": f"/api/reports/demand_{rid}/05_design_decisions.md",
+        },
+        "proposed_features": feature_files,
+    }
+    (out_dir / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
+    return index
+
+
+# ── 5) Public entrypoint ─────────────────────────────────────────────────────
+
+
+async def build_demand_report(
+    project: dict[str, Any],
+    *,
+    pages: Optional[list[dict]] = None,
+    button_actions: Optional[list[dict]] = None,
+    page_summaries: Optional[list[dict]] = None,
+    on_progress: Optional[ProgressFn] = None,
+    db=None,
+    user_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Full research-grade demand intelligence pack."""
+    name = project.get("name") or urlparse(project.get("url") or "").netloc or "app"
+    blob = _product_context_blob(project, pages, page_summaries, button_actions)
+    vertical = _infer_vertical(project, blob)
+
+    if on_progress:
+        await on_progress({"type": "demand_log", "message": f"Planning research keywords for {name} ({vertical})…"})
+
+    plan = await plan_research_keywords(
