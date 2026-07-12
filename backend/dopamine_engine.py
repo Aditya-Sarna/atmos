@@ -283,3 +283,98 @@ def _generate_suggestions(
             "title": "Add skeleton loading states",
             "thesis": "Perceived wait time drops when users see content-shaped placeholders (skeleton screens).",
             "recommendation": "Use skeleton UI during data fetches instead of spinners or blank screens.",
+            "impact": "medium",
+            "pattern_ref": "skeleton_loading",
+            "kind": "engagement",
+        })
+
+    if engagement_max:
+        for pat in profile.get("patterns", []):
+            pid = pat["id"]
+            if not any(s.get("pattern_ref") == pid for s in suggestions):
+                suggestions.append({
+                    "id": f"pattern_{pid}",
+                    "title": f"Consider: {pat['name']}",
+                    "thesis": f"Industry pattern for {profile['label']} with {pat['impact']} engagement impact.",
+                    "recommendation": f"Implement {pat['name']} tailored to your app's primary conversion flow.",
+                    "impact": pat["impact"],
+                    "pattern_ref": pid,
+                    "kind": "engagement_max",
+                })
+
+    return suggestions[:10]
+
+
+DARK_PATTERN_DISCLAIMER = (
+    "DISCLAIMER: The suggestions below describe deceptive design patterns that some "
+    "products use to increase conversion. Atmos lists them for competitive awareness "
+    "and red-team / ethics review only. Implementing them can harm users, violate "
+    "consumer-protection law (e.g. FTC, DSA, GDPR), and damage trust. Prefer ethical "
+    "engagement alternatives. Atmos does not recommend shipping these patterns."
+)
+
+# Catalog of known dark patterns — suggested when NOT detected on the page.
+DARK_PATTERN_CATALOG: list[dict[str, Any]] = [
+    {
+        "id": "fake_urgency",
+        "name": "Fake urgency / scarcity",
+        "category": "urgency",
+        "conversion_claim": "Scarcity cues often lift short-term conversion 5–15% in e-commerce tests.",
+        "how": "Show 'Only N left' or 'Hurry — offer ends' near the CTA (even when inventory is not live).",
+        "where": "Product detail, cart, checkout, pricing.",
+        "risk": "Illegal if fabricated; trains distrust when users notice resets.",
+        "app_types": ["e-commerce", "finance", "generic", "dashboard"],
+    },
+    {
+        "id": "countdown_timer",
+        "name": "Countdown / expiry timer",
+        "category": "urgency",
+        "conversion_claim": "Time pressure increases impulse checkout rates.",
+        "how": "Add a ticking timer on a discount that resets on refresh.",
+        "where": "Landing hero, checkout banner, modal upsell.",
+        "risk": "Deceptive if the expiry is not real.",
+        "app_types": ["e-commerce", "generic"],
+    },
+    {
+        "id": "confirmshaming",
+        "name": "Confirmshaming",
+        "category": "confirmshaming",
+        "conversion_claim": "Guilt-framed decline paths raise opt-in rates for newsletters and trials.",
+        "how": "Style the decline as 'No thanks, I hate saving money' vs a bright Accept.",
+        "where": "Exit-intent modal, trial upgrade, newsletter gate.",
+        "risk": "Manipulative; banned in several dark-pattern regulations.",
+        "app_types": ["e-commerce", "dashboard", "generic", "finance"],
+    },
+    {
+        "id": "prechecked_optin",
+        "name": "Pre-checked opt-in / upsell",
+        "category": "forced_action",
+        "conversion_claim": "Default-on add-ons and marketing boxes convert passive consent.",
+        "how": "Pre-check insurance, newsletter, or SMS boxes on signup/checkout.",
+        "where": "Checkout, registration, billing.",
+        "risk": "Often unlawful under GDPR; chargebacks and complaints.",
+        "app_types": ["e-commerce", "finance", "dashboard", "generic"],
+    },
+    {
+        "id": "hidden_costs",
+        "name": "Hidden costs at the last step",
+        "category": "hidden_costs",
+        "conversion_claim": "Low sticker price increases funnel entry; fees drop out later.",
+        "how": "Advertise a low price, reveal tax/shipping/service fees only on payment.",
+        "where": "Cart → checkout total.",
+        "risk": "FTC / consumer-law exposure; high abandon + support cost.",
+        "app_types": ["e-commerce", "finance", "generic"],
+    },
+    {
+        "id": "misdirection",
+        "name": "Misdirection (visual hierarchy)",
+        "category": "misdirection",
+        "conversion_claim": "Making Accept loud and Decline nearly invisible steers clicks.",
+        "how": "Primary CTA high-contrast; Skip/No as tiny grey text.",
+        "where": "Paywalls, cookie walls, upgrade screens.",
+        "risk": "Accessibility + deceptive-design claims.",
+        "app_types": ["dashboard", "e-commerce", "generic", "finance"],
+    },
+    {
+        "id": "forced_continuity",
+        "name": "Forced continuity (trial → charge)",
