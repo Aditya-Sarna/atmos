@@ -1385,3 +1385,106 @@ function ArchitecturePanel({ arch, runId }) {
         action: { label: "Open", onClick: () => window.open(r.data.url, "_blank") },
       });
     } catch (e) {
+      toast.error("Could not open PR", { description: e?.response?.data?.detail || e.message });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="card-elev p-5 md:p-6">
+        <div className="flex items-center gap-6 flex-wrap">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B]">Overall</div>
+            <div className="font-display text-5xl tabular-nums">{score.overall ?? "—"}</div>
+            <div className="text-xs text-[#86868B] mt-1">{arch.archetype || "app"}</div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 flex-1 min-w-[300px]">
+            {axesList.map(([k, v]) => (
+              <div key={k} className="rounded-xl bg-[#F5F5F7] p-3">
+                <div className="text-[10px] uppercase tracking-wider text-[#86868B]">{k}</div>
+                <div className="font-display text-xl tabular-nums">{architectureText(v)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {peers.length > 0 && (
+        <div className="card-elev p-5 md:p-6" data-testid="arch-peers">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">How peers do it</div>
+          <div className="grid md:grid-cols-2 gap-3">
+            {peers.map((p, i) => (
+              <div key={i} className="rounded-xl border border-black/5 p-4">
+                <div className="font-medium">{p.name}</div>
+                <div className="text-xs text-[#86868B] mt-1">{architectureText(p.pattern || p.score)}</div>
+                <div className="text-sm mt-2">{architectureText(p.takeaway || p.detail || p.what_they_do_better || p.what_to_copy)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {suggestions.length > 0 && (
+        <div className="card-elev p-5 md:p-6" data-testid="arch-suggestions">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Architecture upgrades</div>
+          <div className="space-y-4">
+            {suggestions.map((s) => (
+              <div key={s.id} className="rounded-xl border border-black/5 p-4">
+                <div className="flex gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium">{s.title}</div>
+                    <div className="text-sm text-[#1D1D1F]/80 mt-1">{s.summary || s.rationale}</div>
+                    {(s.files || []).length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {s.files.map((f) => (
+                          <span key={f} className="inline-flex items-center gap-1 rounded-md bg-[#F5F5F7] px-2 py-0.5 text-[11px] font-mono text-[#1D1D1F]/70">
+                            {f}{s.file_line && s.files[0] === f ? `:${s.file_line}` : ""}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {s.peer_comparison && (
+                      <div className="text-[11px] text-[#86868B] mt-2">{s.peer_comparison}</div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => applyOne(s)}
+                    disabled={busy === s.id}
+                    className="shrink-0 self-start rounded-full h-9 px-4 inline-flex items-center gap-1.5 bg-[#1D1D1F] text-white text-xs disabled:opacity-60"
+                    data-testid={`arch-apply-${s.id}`}
+                    title="Open a PR with this change"
+                  >
+                    <CheckCircle2 className="h-4 w-4" strokeWidth={2} />
+                    {busy === s.id ? "Opening PR…" : "Apply via PR"}
+                  </button>
+                </div>
+                {s.code_snippet && (
+                  <details className="mt-3">
+                    <summary className="text-[11px] text-[#86868B] cursor-pointer select-none">
+                      View code reference{s.file_line ? ` (line ${s.file_line})` : ""}
+                    </summary>
+                    <pre className="mt-2 rounded-lg bg-[#1D1D1F] text-[#F5F5F7] text-[11px] p-3 overflow-x-auto whitespace-pre-wrap leading-relaxed font-mono">
+                      {s.code_snippet}
+                    </pre>
+                  </details>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {nextMoves.length > 0 && (
+        <div className="card-elev p-5 md:p-6">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Next 3 moves</div>
+          <ol className="space-y-2 list-decimal pl-5 text-sm">
+            {nextMoves.map((m, i) => <li key={i}>{architectureText(m)}</li>)}
+          </ol>
+        </div>
+      )}
+    </>
+  );
+}
