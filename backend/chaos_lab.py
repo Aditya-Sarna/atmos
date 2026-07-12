@@ -493,3 +493,102 @@ async def run_chaos_lab(
         "success_rate": last.get("success_rate"),
         "error_rate": last.get("error_rate"),
         "latency_p50_ms": last.get("latency_p50_ms"),
+        "latency_p95_ms": last.get("latency_p95_ms"),
+        "latency_p99_ms": last.get("latency_p99_ms"),
+        "architecture": graph,
+        "include_payments": include_payments,
+        "payment_summary": last.get("payment_summary"),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "thesis": (
+            f"{'Crash-tested' if mode == 'crash' else 'Load-tested'} "
+            f"{'selected pages' if scope == 'pages' else 'entire app'} "
+            f"to {breaking_point or last.get('users')} concurrent users"
+            + (f" — broke: {break_reason}" if break_reason else " — held steady")
+        ),
+    }
+    await emit("chaos_completed", summary)
+    return summary
+
+
+async def _run_stage(
+    browser: Browser,
+    urls: list[str],
+    users: int,
+    hold_secs: float,
+    *,
+    include_payments: bool,
+    payment_provider: str,
+    graph: dict[str, Any],
+    break_success_rate: float,
+    break_p95_ms: float,
+    emit,
+) -> dict[str, Any]:
+    t0 = time.monotonic()
+    await emit("chaos_log", {"message": f"Stage {users} users · probing {len(urls)} page(s)…"})
+
+    http_n = min(users, MAX_HTTP_CONCURRENCY)
+    pw_n = min(max(3, users // 10), MAX_PLAYWRIGHT_USERS)
+
+    http_task = asyncio.create_task(_http_probe_batch(urls, http_n, hold_secs=hold_secs))
+    pw_task = asyncio.create_task(
+        _playwright_sample(
+            browser, urls, pw_n,
+            include_payments=include_payments,
+            payment_provider=payment_provider,
+        )
+    )
+    http_result, pw_result = await asyncio.gather(http_task, pw_task)
+
+    # Blend: weight HTTP volume higher, Playwright for UX signal
+    h_sr = http_result.get("success_rate") or 0
+    p_sr = pw_result.get("success_rate") or 0
+    success_rate = 0.7 * h_sr + 0.3 * p_sr
+    p95 = max(http_result.get("latency_p95_ms") or 0, pw_result.get("latency_p95_ms") or 0)
+    p50 = http_result.get("latency_p50_ms") or 0
+    p99 = http_result.get("latency_p99_ms") or 0
+    error_rate = 1.0 - success_rate
+
+    nodes = _update_nodes_from_probe(graph, http_result, pw_result)
+    broken, reason = _stage_broken(
+        success_rate, p95,
+        break_success_rate=break_success_rate,
+        break_p95_ms=break_p95_ms,
+    )
+
+    payment_summary = {
+        "attempts": pw_result.get("payment_attempts") or 0,
+        "fields_filled": pw_result.get("payment_filled") or 0,
+        "provider": payment_provider,
+        "live_browser": True,
+    }
+
+    await emit("chaos_architecture", {"nodes": nodes, "users": users})
+    await emit("chaos_metrics", {
+        "users": users,
+        "success_rate": round(success_rate, 4),
+        "error_rate": round(error_rate, 4),
+        "latency_p95_ms": round(p95, 1),
+        "http_requests": http_result.get("total"),
+        "playwright_users": pw_result.get("playwright_users"),
+        "broken": broken,
+    })
+
+    return {
+        "users": users,
+        "success_rate": round(success_rate, 4),
+        "error_rate": round(error_rate, 4),
+        "latency_p50_ms": round(p50, 1),
+        "latency_p95_ms": round(p95, 1),
+        "latency_p99_ms": round(p99, 1),
+        "broken": broken,
+        "break_reason": reason,
+        "node_health": nodes,
+        "payment_summary": payment_summary,
+        "duration_secs": round(time.monotonic() - t0, 2),
+        "http": {k: http_result[k] for k in ("ok", "errors", "total", "success_rate") if k in http_result},
+        "playwright": {
+            k: pw_result[k]
+            for k in ("ok", "errors", "playwright_users", "payment_attempts")
+            if k in pw_result
+        },
+    }
