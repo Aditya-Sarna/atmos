@@ -2822,3 +2822,97 @@ async def api_generate_test_plan(
     plan = await generate_test_plan(
         db, user.user_id, proj, body.command,
         codebase_summary=summary,
+        page_url=body.page_url or proj.get("url"),
+    )
+    return plan
+
+
+@api.get("/projects/{project_id}/test-plans/{plan_id}")
+async def api_get_test_plan(project_id: str, plan_id: str, user: User = Depends(current_user)):
+    plan = await db.test_plans.find_one(
+        {"plan_id": plan_id, "project_id": project_id, "user_id": user.user_id},
+        {"_id": 0},
+    )
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return plan
+
+
+@api.put("/projects/{project_id}/test-plans/{plan_id}")
+async def api_update_test_plan(
+    project_id: str, plan_id: str, body: TestPlanUpdateBody, user: User = Depends(current_user),
+):
+    updated = await update_test_plan(db, plan_id, user.user_id, body.model_dump(exclude_none=True))
+    if not updated:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return updated
+
+
+@api.patch("/projects/{project_id}/settings")
+async def api_update_project_settings(
+    project_id: str, body: ProjectSettingsUpdate, user: User = Depends(current_user),
+):
+    await require_permission(db, user.user_id, "projects:write")
+    q = await project_query_for_user(db, user.user_id)
+    q["project_id"] = project_id
+    patch = body.model_dump(exclude_none=True)
+    if patch.get("craft_api_token") == "rotate":
+        patch["craft_api_token"] = f"craft_{uuid.uuid4().hex}"
+    if "craft_gate_threshold" in patch:
+        patch["craft_gate_threshold"] = max(0, min(100, int(patch["craft_gate_threshold"])))
+    if not patch:
+        raise HTTPException(status_code=400, detail="No settings")
+    result = await db.projects.update_one(q, {"$set": patch})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+    doc = await db.projects.find_one(q, {"_id": 0})
+    # Never echo full token accidentally in logs; return once on rotate
+    return doc
+
+@api.get("/design-themes")
+async def api_design_themes():
+    return {"themes": {k: {"label": v["label"], "description": v["description"]} for k, v in CONTEXT_THEMES.items()}}
+
+
+# ----------------------------------------------------------------------------
+# IDE extension — codebase context + user LLM
+# ----------------------------------------------------------------------------
+
+
+class IdeContextBody(BaseModel):
+    workspace_root: Optional[str] = None
+    workspace_name: Optional[str] = None
+    open_file: Optional[str] = None
+    selection: Optional[str] = None
+    page_url: Optional[str] = None
+    files: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class UserLlmConfigBody(BaseModel):
+    enabled: bool = True
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: str = "gpt-4o"
+    provider: str = "openai_compatible"
+    mode: str = "ide_native"  # ide_native | http
+    preferred_model: Optional[str] = None
+    preferred_vision_model: Optional[str] = None
+
+
+class IdeLlmHeartbeatBody(BaseModel):
+    ide: str = "vscode"  # vscode | cursor | claude
+    models: list[str] = Field(default_factory=list)
+    supports_vision: bool = False
+    extension_version: str = "0.2.0"
+    preferred_model: Optional[str] = None
+    preferred_vision_model: Optional[str] = None
+
+
+class IdeLlmCompleteBody(BaseModel):
+    result_text: Optional[str] = None
+    error: Optional[str] = None
+    model_used: Optional[str] = None
+
+
+@api.post("/ide/context")
+async def api_ide_context(body: IdeContextBody, user: User = Depends(current_user)):
