@@ -1088,3 +1088,102 @@ export default function RunMonitor() {
           {competitiveDiffs.length > 0 && (
             <div className="card-elev p-5" data-testid="competitive-diff-card">
               <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Competitive UX diff</div>
+              {competitiveDiffs.map((d) => (
+                <div key={d.seq || d.competitor} className="mb-4 last:mb-0">
+                  <div className="text-sm font-medium">You vs {d.competitor}</div>
+                  {d.side_by_side_url && (
+                    <img
+                      src={`${process.env.REACT_APP_BACKEND_URL}${d.side_by_side_url}`}
+                      alt={`vs ${d.competitor}`}
+                      className="w-full rounded-lg mt-2 border border-black/5"
+                    />
+                  )}
+                  <ul className="mt-2 space-y-1">
+                    {(d.patterns || []).slice(0, 3).map((p, i) => (
+                      <li key={i} className="text-xs text-[#86868B]">→ {p}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Design theory */}
+          {designTheory && (
+            <div className="card-elev p-5" data-testid="design-theory-card">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-2">Design fundamentals</div>
+              <div className="font-display text-2xl tabular-nums">{designTheory.score}/100</div>
+              <p className="text-xs text-[#86868B] mt-1">{designTheory.theme_label} — {designTheory.theme_description}</p>
+              {designIssues.slice(0, 3).map((iss, i) => (
+                <div key={i} className="mt-2 text-xs p-2 rounded-lg bg-[#FFF8E6] border border-[#FF9500]/15">{iss.title}</div>
+              ))}
+            </div>
+          )}
+
+          {/* Dopamine / dark patterns — jump to tab */}
+          {(dopamineAnalysis?.enabled || summary?.dopamine?.enabled) && (
+            <div
+              className="card-elev p-5 cursor-pointer"
+              data-testid="dopamine-card"
+              onClick={() => setActiveTab("dopamine")}
+            >
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-2">Engagement & dark patterns</div>
+              <div className="font-display text-2xl tabular-nums">
+                {(dopamineAnalysis || summary?.dopamine)?.dark_pattern_score ?? "—"}
+                <span className="text-sm text-[#86868B] ml-1">/ 100</span>
+              </div>
+              <p className="text-xs text-[#86868B] mt-1">
+                {(dopamineAnalysis || summary?.dopamine)?.dark_patterns?.length || 0} dark pattern(s) · open tab
+              </p>
+            </div>
+          )}
+
+          {copywritingReport && (
+            <div className="card-elev p-5 cursor-pointer" data-testid="copy-sidebar" onClick={() => setActiveTab("copy")}>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-2">Copy score</div>
+              <div className="font-display text-2xl tabular-nums">{copywritingReport.avg_score}/100</div>
+              <p className="text-xs text-[#86868B] mt-1">{copywritingReport.blocks_analyzed} blocks · open Copy tab</p>
+            </div>
+          )}
+
+          {demandReport && (
+            <div className="card-elev p-5 cursor-pointer" data-testid="demand-sidebar" onClick={() => setActiveTab("demand")}>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-2">Demand gaps</div>
+              <div className="font-display text-2xl tabular-nums">{demandReport.top_gaps?.length || 0}</div>
+              <p className="text-xs text-[#86868B] mt-1">
+                S-tier: {(demandReport.tier_summary?.S || []).length} · open Demand tab
+              </p>
+            </div>
+          )}
+
+          {/* Live scores */}
+          {summary && (
+            <div className="card-elev p-5" data-testid="live-scores-card">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Craft Score</div>
+              {summary.craft_score?.overall != null && (
+                <div className="mb-4" data-testid="monitor-craft-score">
+                  <div className="font-display text-4xl tabular-nums tracking-tight">
+                    {summary.craft_score.overall}
+                    <span className="text-sm text-[#86868B] ml-2">/ 100</span>
+                  </div>
+                  <div className="text-xs text-[#86868B] mt-1">
+                    {String(summary.craft_score.tier || "").replace("_", " ")}
+                    {summary.craft_gate ? ` · gate ${summary.craft_gate.passed ? "PASS" : "FAIL"}` : ""}
+                    {summary.craft_baseline?.has_baseline
+                      ? ` · Δ ${summary.craft_baseline.delta >= 0 ? "+" : ""}${summary.craft_baseline.delta}`
+                      : ""}
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-3 gap-2">
+                <ScoreRing value={summary.scores?.accessibility} label="A11y" color="#0071E3" />
+                <ScoreRing value={summary.scores?.ux} label="UX" color="#34C759" />
+                <ScoreRing value={summary.scores?.reliability} label="Reliab." color="#FF9500" />
+              </div>
+            </div>
+          )}
+
+          {/* Issue list snapshot */}
+          {issues.length > 0 && (
+            <div className="card-elev p-5" data-testid="issues-snapshot">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Issues ({issues.length})</div>
