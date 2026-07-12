@@ -12,6 +12,14 @@ export async function authExchange(sessionId) {
   return api.post("/auth/session", { session_id: sessionId });
 }
 
+export async function authLogin(payload) {
+  return api.post("/auth/login", payload);
+}
+
+export async function authRegister(payload) {
+  return api.post("/auth/register", payload);
+}
+
 export async function authMe() {
   return api.get("/auth/me");
 }
@@ -36,8 +44,43 @@ export async function getProject(projectId) {
   return api.get(`/projects/${projectId}`);
 }
 
-export async function startRun(projectId, command) {
-  return api.post(`/projects/${projectId}/runs`, { command });
+export async function getProjectCraft(projectId) {
+  return api.get(`/projects/${projectId}/craft`);
+}
+
+export async function craftGateCheck(projectId, threshold) {
+  const q = threshold != null ? `?threshold=${threshold}` : "";
+  return api.get(`/projects/${projectId}/craft/gate${q}`);
+}
+
+export async function startRun(projectId, body) {
+  const payload = typeof body === "string" ? { command: body } : body;
+  return api.post(`/projects/${projectId}/runs`, payload);
+}
+
+// ── Test plan editor ───────────────────────────────────────────────────────
+export async function generateTestPlan(projectId, body) {
+  return api.post(`/projects/${projectId}/test-plans/generate`, body);
+}
+export async function getTestPlan(projectId, planId) {
+  return api.get(`/projects/${projectId}/test-plans/${planId}`);
+}
+export async function updateTestPlan(projectId, planId, body) {
+  return api.put(`/projects/${projectId}/test-plans/${planId}`, body);
+}
+export async function updateProjectSettings(projectId, body) {
+  return api.patch(`/projects/${projectId}/settings`, body);
+}
+export async function listDesignThemes() {
+  return api.get("/design-themes");
+}
+
+// ── IDE extension ──────────────────────────────────────────────────────────
+export async function syncIdeContext(body) {
+  return api.post("/ide/context", body);
+}
+export async function setUserLlmConfig(body) {
+  return api.put("/ide/llm-config", body);
 }
 
 export async function getRun(runId) {
@@ -55,28 +98,4 @@ export async function listCommands() {
  */
 export async function applyPatch(runId, body) {
   return api.post(`/runs/${runId}/apply`, body);
-}
-
-// ── Swarm load testing ─────────────────────────────────────────────────────
-export async function startSwarm(runId, body) {
-  return api.post(`/runs/${runId}/swarm/start`, body);
-}
-export async function getSwarmLive(runId) {
-  return api.get(`/runs/${runId}/swarm/live`);
-}
-export async function generateShipReport(runId) {
-  return api.post(`/runs/${runId}/swarm/ship-report`);
-}
-
-// ── Payment simulation ─────────────────────────────────────────────────────
-export async function simulatePayments(runId, body) {
-  return api.post(`/runs/${runId}/payment/simulate`, body);
-}
-export async function getPaymentResults(runId) {
-  return api.get(`/runs/${runId}/payment/results`);
-}
-
-// ── GitHub token test ──────────────────────────────────────────────────────
-export async function testGithubToken(projectId) {
-  return api.post(`/projects/${projectId}/github-token/test`);
 }
