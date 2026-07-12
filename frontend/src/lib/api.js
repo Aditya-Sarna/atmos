@@ -99,3 +99,92 @@ export async function listCommands() {
 export async function applyPatch(runId, body) {
   return api.post(`/runs/${runId}/apply`, body);
 }
+
+// ── Swarm / Chaos Lab ─────────────────────────────────────────────────────
+export async function startSwarm(runId, body) {
+  return api.post(`/runs/${runId}/swarm/start`, body);
+}
+export async function startChaos(runId, body) {
+  return api.post(`/runs/${runId}/chaos/start`, body);
+}
+export async function getChaosLive(runId) {
+  return api.get(`/runs/${runId}/chaos/live`);
+}
+export async function setChaosTargets(projectId, body) {
+  return api.put(`/projects/${projectId}/chaos/targets`, body);
+}
+export async function getChaosTargets(projectId) {
+  return api.get(`/projects/${projectId}/chaos/targets`);
+}
+export async function getSwarmLive(runId) {
+  return api.get(`/runs/${runId}/swarm/live`);
+}
+export async function generateShipReport(runId) {
+  return api.post(`/runs/${runId}/swarm/ship-report`);
+}
+
+// ── Payment simulation ─────────────────────────────────────────────────────
+export async function simulatePayments(runId, body) {
+  return api.post(`/runs/${runId}/payment/simulate`, body);
+}
+export async function getPaymentResults(runId) {
+  return api.get(`/runs/${runId}/payment/results`);
+}
+
+// ── GitHub token test ──────────────────────────────────────────────────────
+export async function testGithubToken(projectId) {
+  return api.post(`/projects/${projectId}/github-token/test`);
+}
+
+// ── Team / RBAC ──────────────────────────────────────────────────────────────
+export async function getTeam() {
+  return api.get("/team");
+}
+export async function updateRolePermissions(roleId, permissions) {
+  return api.put(`/team/roles/${roleId}`, { permissions });
+}
+export async function inviteMember(email, role) {
+  return api.post("/team/members", { email, role });
+}
+export async function updateMemberRole(userId, role) {
+  return api.patch(`/team/members/${userId}`, { role });
+}
+export async function removeMember(userId) {
+  return api.delete(`/team/members/${userId}`);
+}
+
+// ── Custom test cases ──────────────────────────────────────────────────────
+export async function listCustomTestCases(projectId) {
+  return api.get(`/projects/${projectId}/test-cases`);
+}
+export async function createCustomTestCase(projectId, body) {
+  return api.post(`/projects/${projectId}/test-cases`, body);
+}
+export async function updateCustomTestCase(projectId, caseId, body) {
+  return api.put(`/projects/${projectId}/test-cases/${caseId}`, body);
+}
+export async function deleteCustomTestCase(projectId, caseId) {
+  return api.delete(`/projects/${projectId}/test-cases/${caseId}`);
+}
+
+// ── UI references ────────────────────────────────────────────────────────────
+export async function searchReferences(q, appType = "generic") {
+  return api.get("/references", { params: { q, app_type: appType } });
+}
+export async function refreshReferences(appType = "generic") {
+  return api.post("/references/refresh", null, { params: { app_type: appType } });
+}
+
+// ── Copywriting + Demand intelligence ──────────────────────────────────────
+export async function analyzeProjectCopy(projectId) {
+  return api.post(`/projects/${projectId}/copywriting/analyze`);
+}
+export async function rewriteCopy(body) {
+  return api.post("/copywriting/rewrite", body);
+}
+export async function getDemandReport(projectId) {
+  return api.post(`/projects/${projectId}/demand/report`);
+}
+export async function listMarketingProfiles() {
+  return api.get("/marketing-profiles");
+}
