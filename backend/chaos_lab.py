@@ -196,3 +196,102 @@ async def _http_probe_batch(
         tasks = []
         # Keep the pool saturated until hold expires
         while time.monotonic() < stop_at:
+            for url in urls:
+                if time.monotonic() >= stop_at:
+                    break
+                tasks.append(asyncio.create_task(one(url)))
+                if len(tasks) >= concurrency * 3:
+                    await asyncio.gather(*tasks)
+                    tasks = []
+            await asyncio.sleep(0.05)
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    total = ok + errors
+    return {
+        "ok": ok,
+        "errors": errors,
+        "total": total,
+        "success_rate": (ok / total) if total else 0.0,
+        "latency_p50_ms": _pct(latencies, 50),
+        "latency_p95_ms": _pct(latencies, 95),
+        "latency_p99_ms": _pct(latencies, 99),
+        "per_url": {
+            u: {
+                "ok": v["ok"],
+                "err": v["err"],
+                "latency_p95_ms": _pct(v["latencies"], 95),
+                "requests": v["ok"] + v["err"],
+            }
+            for u, v in per_url.items()
+        },
+    }
+
+
+async def _playwright_sample(
+    browser: Browser,
+    urls: list[str],
+    users: int,
+    *,
+    include_payments: bool = False,
+    payment_provider: str = "stripe",
+) -> dict[str, Any]:
+    """Small Playwright cohort for journey fidelity + payment field probes."""
+    users = max(1, min(users, MAX_PLAYWRIGHT_USERS))
+    latencies: list[float] = []
+    ok = 0
+    errors = 0
+    payment_attempts = 0
+    payment_ok = 0
+
+    from payment_sandbox import PaymentOutcome, TestPaymentGenerator, PaymentProvider
+
+    try:
+        provider = PaymentProvider(payment_provider.lower())
+    except Exception:  # noqa: BLE001
+        provider = PaymentProvider.STRIPE
+    gen = TestPaymentGenerator(provider)
+
+    async def user_journey(idx: int) -> None:
+        nonlocal ok, errors, payment_attempts, payment_ok
+        ctx = await browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            ignore_https_errors=True,
+        )
+        page = await ctx.new_page()
+        try:
+            url = urls[idx % len(urls)]
+            t0 = time.perf_counter()
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_timeout(400)
+            ms = (time.perf_counter() - t0) * 1000
+            latencies.append(ms)
+            status = resp.status if resp else 0
+            if status and status >= 500:
+                errors += 1
+            else:
+                ok += 1
+
+            if include_payments:
+                # Probe for payment-looking fields and fill Stripe test card when present
+                card = page.locator(
+                    "input[name*='card' i], input[autocomplete='cc-number'], "
+                    "input[placeholder*='card' i], input[id*='card' i]"
+                )
+                if await card.count() > 0:
+                    payment_attempts += 1
+                    outcome = random.choice(
+                        [PaymentOutcome.SUCCESS, PaymentOutcome.DECLINE, PaymentOutcome.INSUFFICIENT_FUNDS]
+                    )
+                    number = gen.generate_test_card(outcome)
+                    try:
+                        await card.first.fill(number, timeout=4000)
+                        exp = page.locator("input[name*='exp' i], input[autocomplete='cc-exp']")
+                        if await exp.count() > 0:
+                            await exp.first.fill("12/34", timeout=2000)
+                        cvc = page.locator("input[name*='cvc' i], input[autocomplete='cc-csc']")
+                        if await cvc.count() > 0:
+                            await cvc.first.fill("123", timeout=2000)
+                        payment_ok += 1 if outcome == PaymentOutcome.SUCCESS else 0
+                    except Exception:  # noqa: BLE001
+                        pass
