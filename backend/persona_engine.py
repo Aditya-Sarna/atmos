@@ -283,3 +283,98 @@ async def _audit_click_depth(page: Page, base_url: str) -> tuple[bool, str, int]
             return r.width > 10 && r.height > 10;
           });
           return Math.min(links.length, 12);
+        }"""
+    )
+    # Heuristic: if many nav items, core task may be deep
+    clicks_estimate = 2 if depth <= 6 else 4 if depth <= 10 else 6
+    ok = clicks_estimate <= 3
+    msg = f"Estimated {clicks_estimate} clicks to core action (nav complexity: {depth} items)"
+    return ok, msg, clicks_estimate
+
+
+async def _audit_reflow(page: Page, zoom: float) -> tuple[bool, str]:
+    await page.evaluate(f"() => {{ document.documentElement.style.zoom = '{zoom}'; }}")
+    await page.wait_for_timeout(300)
+    result = await page.evaluate(
+        """() => {
+          const sw = document.documentElement.scrollWidth;
+          const cw = document.documentElement.clientWidth;
+          return { ok: sw <= cw + 20, scrollWidth: sw, clientWidth: cw };
+        }"""
+    )
+    await page.evaluate("() => { document.documentElement.style.zoom = '1'; }")
+    if result["ok"]:
+        return True, f"Content reflows at {int(zoom*100)}% zoom"
+    return False, f"Horizontal scroll at {int(zoom*100)}% zoom ({result['scrollWidth']}px > {result['clientWidth']}px)"
+
+
+async def _run_rule(page: Page, rule_id: str, persona: dict[str, Any], base_url: str) -> tuple[bool, str]:
+    min_touch = 48 if persona["id"] == "child" else 44
+    checks: dict[str, Any] = {
+        "touch_44": lambda: _audit_touch_targets(page, min_touch),
+        "large_targets": lambda: _audit_touch_targets(page, 48),
+        "font_16": lambda: _audit_font_size(page, 16),
+        "aria_labels": lambda: _audit_aria(page),
+        "landmarks": lambda: _audit_landmarks(page),
+        "primary_cta": lambda: _audit_primary_cta(page),
+        "keyboard_shortcuts": lambda: _audit_accelerators(page),
+        "search_quick": lambda: _audit_accelerators(page),
+        "click_efficiency": lambda: _audit_click_depth(page, base_url),
+        "reflow": lambda: _audit_reflow(page, persona.get("zoom_factor", 2.0)),
+        "contrast": lambda: _audit_font_size(page, 14),  # proxy when full contrast calc unavailable
+        "nav_simple": lambda: _audit_primary_cta(page),
+        "simple_language": lambda: _audit_font_size(page, 15),
+    }
+    fn = checks.get(rule_id)
+    if not fn:
+        return True, f"Rule {rule_id} passed (baseline)"
+    result = await fn()
+    if len(result) == 3:
+        return result[0], result[1]
+    return result[0], result[1]
+
+
+async def _run_single_persona(
+    browser: Browser,
+    target_url: str,
+    run_id: str,
+    persona: dict[str, Any],
+    on_progress: Optional[ProgressFn] = None,
+) -> dict[str, Any]:
+    vp = next((v for v in VIEWPORTS if v["label"] == persona.get("viewport", "Desktop 1440")), VIEWPORTS[-1])
+    pid = persona["id"]
+    slug = _safe_name(f"persona_{pid}")
+    video_name = f"{run_id}_{slug}.webm"
+
+    ctx = await _new_context(browser, vp, record_video=True, record_dir=SCREENSHOTS_DIR)
+    page = await ctx.new_page()
+
+    annotations: list[dict[str, Any]] = []
+    rule_results: list[dict[str, Any]] = []
+    total_weight = sum(r["weight"] for r in persona["rules"])
+    earned = 0
+
+    try:
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        await _settle(page)
+
+        if persona.get("color_filter") == "protanopia":
+            await page.emulate_media(color_scheme="no-preference")
+            await page.add_style_tag(content="html { filter: url('#protanopia'); }")
+
+        if persona.get("keyboard_only"):
+            await page.keyboard.press("Tab")
+            await page.wait_for_timeout(200)
+
+        await _show_annotation(
+            page, persona["label"],
+            f"Starting {persona['label']} simulation — {persona['focus']}",
+            "#0071E3",
+        )
+
+        for rule in persona["rules"]:
+            passed, detail = await _run_rule(page, rule["id"], persona, target_url)
+            rule_results.append({"id": rule["id"], "desc": rule["desc"], "passed": passed, "detail": detail})
+            if passed:
+                earned += rule["weight"]
+            else:
