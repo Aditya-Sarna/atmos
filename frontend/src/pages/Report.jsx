@@ -159,3 +159,89 @@ export default function Report() {
 
         {/* COUNTS */}
         <div className="mt-4 card-elev p-6 grid grid-cols-2 md:grid-cols-5 gap-4">
+          {Object.entries(s.counts || {}).map(([k, v]) => (
+            <div key={k} data-testid={`count-${k}`}>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B]">{k}</div>
+              <div className="font-display text-3xl tabular-nums">{v}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* CRITICAL FINDINGS + RECOMMENDATIONS */}
+        <div className="mt-6 grid lg:grid-cols-2 gap-4">
+          <div className="card-elev p-6 md:p-8" data-testid="critical-findings">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-[#86868B] mb-4">
+              <AlertTriangle className="h-3.5 w-3.5" strokeWidth={1.75} /> Critical findings
+            </div>
+            <ul className="space-y-3">
+              {(s.critical_findings || []).map((c, i) => (
+                <li key={i} className="flex gap-3 text-[#1D1D1F]/90">
+                  <span className="mt-2 w-1.5 h-1.5 rounded-full bg-[#FF3B30] shrink-0" />
+                  <span>{c}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="card-elev p-6 md:p-8" data-testid="recommendations">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-[#86868B] mb-4">
+              <Lightbulb className="h-3.5 w-3.5" strokeWidth={1.75} /> Top recommendations
+            </div>
+            <ol className="space-y-3 list-decimal pl-5">
+              {(s.recommendations || []).map((c, i) => (
+                <li key={i} className="text-[#1D1D1F]/90">{c}</li>
+              ))}
+            </ol>
+          </div>
+        </div>
+
+        {/* COMPETITIVE INSIGHT */}
+        {s.competitive_insight && (
+          <div className="mt-6 card-elev p-6 md:p-8 bg-[#1D1D1F] text-white" data-testid="competitive-insight">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-white/40 mb-3">
+              <Sparkles className="h-3.5 w-3.5" /> Competitive insight
+            </div>
+            <p className="font-display text-xl md:text-2xl tracking-tight leading-snug">{s.competitive_insight}</p>
+            <div className="mt-4 text-sm text-white/55">Benchmarked against: {(s.benchmarks || []).map((b) => b.competitor).join(" · ")}</div>
+          </div>
+        )}
+
+        {/* PERSONAS */}
+        <div className="mt-6 card-elev p-6 md:p-8" data-testid="report-personas">
+          <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-5">Persona scores</div>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {(s.personas || []).map((p) => (
+              <div key={p.id} className="rounded-2xl bg-[#F5F5F7] p-4" data-testid={`persona-score-${p.id}`}>
+                <div className="text-sm font-medium">{p.label}</div>
+                <div className="text-xs text-[#86868B] mt-0.5 leading-snug">{p.focus}</div>
+                <div className="mt-3 flex items-end gap-2">
+                  <div className="font-display text-3xl tabular-nums" style={{ color: SCORE_COLOR(p.score) }}>{p.score}</div>
+                  <div className="text-xs text-[#A1A1A6] mb-1">/ 100</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* APPLICATION GRAPH */}
+        {Array.isArray(s.app_graph) && s.app_graph.length > 0 && (
+          <div className="mt-10" data-testid="report-app-graph">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Application graph · pages crawled</div>
+            <h2 className="font-display text-2xl md:text-3xl tracking-tight font-medium mb-5">
+              Atmos analysed {s.app_graph.length} page{s.app_graph.length === 1 ? "" : "s"} across your app.
+            </h2>
+            <AppGraph pages={s.app_graph} />
+          </div>
+        )}
+
+        {/* PAGE-BY-PAGE ANALYSIS */}
+        {Array.isArray(s.page_summaries) && s.page_summaries.length > 0 && (
+          <div className="mt-10" data-testid="report-page-summaries">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Per-screen analysis</div>
+            <h2 className="font-display text-2xl md:text-3xl tracking-tight font-medium mb-5">
+              What Atmos found on each page.
+            </h2>
+            <div className="grid gap-3 md:grid-cols-2">
+              {s.page_summaries.map((p, i) => (
+                <div key={`${p.url}-${i}`} className="card-elev p-4 md:p-5" data-testid={`page-summary-${i}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
