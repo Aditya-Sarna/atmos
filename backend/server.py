@@ -848,3 +848,97 @@ async def stream_run(run_id: str, request: Request):
                 return
 
             while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield b": keep-alive\n\n"
+                    continue
+                if ev.get("__type") == "done":
+                    yield f"event: done\ndata: {json.dumps({'status': ev.get('status', 'completed')})}\n\n".encode()
+                    break
+                yield f"data: {json.dumps(ev)}\n\n".encode()
+        finally:
+            _unsubscribe(run_id, q)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+# ----------------------------------------------------------------------------
+# Test-run simulation engine
+# ----------------------------------------------------------------------------
+
+VIEWPORTS = [
+    {"label": "iPhone 15", "w": 393, "h": 852},
+    {"label": "iPhone SE", "w": 375, "h": 667},
+    {"label": "Pixel 8 Pro", "w": 412, "h": 915},
+    {"label": "Galaxy Fold", "w": 344, "h": 882},
+    {"label": "iPad Air", "w": 820, "h": 1180},
+    {"label": "iPad Pro", "w": 1024, "h": 1366},
+    {"label": "Desktop 1440", "w": 1440, "h": 900},
+    {"label": "Ultrawide", "w": 2560, "h": 1080},
+]
+
+PERSONAS = [
+    {"id": "elderly", "label": "Elderly User (65+)", "focus": "Vision, dexterity, slow reading"},
+    {"id": "blind", "label": "Blind User", "focus": "Screen reader, keyboard-only"},
+    {"id": "low_vision", "label": "Low-Vision User", "focus": "200–400% zoom"},
+    {"id": "color_blind", "label": "Color-Blind User", "focus": "Protanopia / Deuteranopia / Tritanopia"},
+    {"id": "first_time", "label": "First-Time User", "focus": "Discoverability"},
+    {"id": "power_user", "label": "Power User", "focus": "Shortcuts, efficiency"},
+    {"id": "child", "label": "Child User", "focus": "Readability, misclicks"},
+]
+
+BENCHMARKS = {
+    "finance": ["Stripe", "PayPal", "Wise"],
+    "e-commerce": ["Amazon", "Shopify", "Apple Store"],
+    "calendar": ["Google Calendar", "Fantastical", "Cron"],
+    "dashboard": ["Linear", "Notion", "Vercel"],
+    "generic": ["Apple", "Stripe", "Linear"],
+}
+
+
+async def _llm_plan(project: dict[str, Any], command: str) -> dict[str, Any]:
+    try:
+        from user_llm_proxy import user_llm_json
+        data = await user_llm_json(
+            db,
+            project.get("user_id") or "user_local_dev",
+            (
+                f"Target: {project['name']} at {project['url']}\n"
+                f"Detected app type: {project['app_type']}\n"
+                f"Command: {command}\n"
+                "Return JSON only with keys: narrative (1-sentence intro), "
+                "focus_areas (5-8 short strings naming concrete UX surfaces or risks to probe)."
+            ),
+            system=(
+                "You are Atmos, an autonomous UX testing agent. Respond with ONLY JSON, no prose."
+            ),
+            purpose="run_plan",
+        )
+        if isinstance(data, dict) and data.get("focus_areas"):
+            return data
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM plan failed: %s", exc)
+    return {
+        "narrative": f"Probe core journeys on {project.get('name')}.",
+        "focus_areas": ["onboarding", "primary CTA", "forms", "navigation", "errors"],
+    }
+
+
+
+async def _llm_report(project: dict[str, Any], command: str, focus_areas: list[str], issues: list[dict]) -> dict[str, Any]:
+    try:
+        from user_llm_proxy import user_llm_json
+        prompt = (
+            f"Target: {project['name']} ({project['url']})\n"
+            f"App type: {project['app_type']}\n"
+            f"Command: {command}\n"
+            f"Focus areas probed: {focus_areas}\n"
+            f"Issues found: {json.dumps(issues[:20])}\n"
+            "Return JSON only with keys: critical_findings (array of 3-5 short sentences), "
