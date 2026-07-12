@@ -660,3 +660,97 @@ async def test_project_github_token(project_id: str, user: User = Depends(curren
 
     repo_full = f"{project['github_owner']}/{project['github_repo']}"
 
+    def _probe() -> dict:
+        try:
+            from github import Github, GithubException  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "stage": "import", "detail": f"PyGithub missing: {exc}"}
+
+        try:
+            gh = Github(token, per_page=1, timeout=15)
+            viewer = gh.get_user()
+            login = viewer.login  # forces a request
+        except GithubException as exc:
+            status = getattr(exc, "status", 0)
+            if status == 401:
+                return {"ok": False, "stage": "auth", "detail": "GitHub returned 401 — the token is invalid, revoked or expired."}
+            return {"ok": False, "stage": "auth", "detail": f"GitHub returned {status}: {exc.data}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "stage": "auth", "detail": f"Could not reach GitHub: {exc}"}
+
+        # Probe repo access.
+        try:
+            repo = gh.get_repo(repo_full)
+            default_branch = repo.default_branch
+            try:
+                permissions = getattr(repo, "permissions", None)
+                can_push = bool(permissions and getattr(permissions, "push", False))
+            except Exception:  # noqa: BLE001
+                can_push = False
+        except GithubException as exc:
+            status = getattr(exc, "status", 0)
+            if status == 404:
+                return {"ok": False, "stage": "repo", "detail": f"This token cannot see {repo_full}. Make sure the PAT has `repo` scope and access to that repository (for org repos, the org must have approved the token)."}
+            return {"ok": False, "stage": "repo", "detail": f"GitHub returned {status}: {exc.data}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "stage": "repo", "detail": str(exc)}
+
+        # Scopes (classic PATs only — fine-grained tokens won't expose this header).
+        scopes: list[str] = []
+        try:
+            # Direct REST hit so we can read the X-OAuth-Scopes header.
+            import httpx
+            with httpx.Client(timeout=10) as h:
+                r = h.get("https://api.github.com/user", headers={"Authorization": f"Bearer {token}"})
+                if r.status_code == 200:
+                    raw = r.headers.get("x-oauth-scopes") or ""
+                    scopes = [s.strip() for s in raw.split(",") if s.strip()]
+        except Exception:  # noqa: BLE001
+            scopes = []
+
+        return {
+            "ok": True,
+            "stage": "ready",
+            "login": login,
+            "repo": repo_full,
+            "default_branch": default_branch,
+            "can_push": can_push,
+            "scopes": scopes,
+            "detail": "Token is valid and can open PRs against this repo.",
+        }
+
+    return await asyncio.to_thread(_probe)
+
+
+
+@api.get("/projects")
+async def list_projects(user: User = Depends(current_user)):
+    await ensure_org_for_user(db, user.user_id, user.email, user.name)
+    q = await project_query_for_user(db, user.user_id)
+    cur = db.projects.find(q, {"_id": 0}).sort("created_at", -1)
+    projects = await cur.to_list(200)
+    out = []
+    for p in projects:
+        last = await db.test_runs.find_one(
+            {"project_id": p["project_id"]},
+            {"_id": 0},
+            sort=[("started_at", -1)],
+        )
+        out.append({"project": p, "last_run": last})
+    return out
+
+
+@api.get("/projects/{project_id}")
+async def get_project(project_id: str, user: User = Depends(current_user)):
+    q = await project_query_for_user(db, user.user_id)
+    q["project_id"] = project_id
+    proj = await db.projects.find_one(q, {"_id": 0})
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+    runs = await db.test_runs.find({"project_id": project_id}, {"_id": 0}).sort("started_at", -1).to_list(50)
+    custom_cases = await db.custom_test_cases.find({"project_id": project_id}, {"_id": 0}).to_list(100)
+    return {"project": proj, "runs": runs, "custom_test_cases": custom_cases}
+
+
+class RunCreate(BaseModel):
+    command: str = "/atmos test"
