@@ -182,3 +182,95 @@ def _deterministic_alternatives(
     role = block["role"]
     voice = APP_TYPE_VOICE.get(app_type, APP_TYPE_VOICE["generic"])
     name = project_name or "your product"
+    alts: list[dict[str, Any]] = []
+
+    for profile in MARKETING_PROFILES[:4]:
+        pid = profile["id"]
+        if role == "headline":
+            templates = {
+                "skeptical_buyer": f"Ship faster with {name} — proven by teams who measure results",
+                "busy_professional": f"{name}: the fastest path from idea to live",
+                "first_time_visitor": f"{name} helps you test products like a real user",
+                "power_user": f"Full-stack UX intelligence for {name} builders",
+                "enterprise_buyer": f"Enterprise-grade product testing with audit-ready evidence",
+            }
+        elif role == "cta":
+            templates = {
+                "skeptical_buyer": "See a sample report",
+                "busy_professional": "Start in 2 min",
+                "first_time_visitor": "Try it free",
+                "power_user": "Run full audit",
+                "enterprise_buyer": "Book a demo",
+            }
+        elif role == "supporting":
+            templates = {
+                "skeptical_buyer": f"See before/after diffs, persona scores, and competitive gaps — not vague advice.",
+                "busy_professional": f"One run. Clear scores. Fixes you can ship today.",
+                "first_time_visitor": f"{name} watches your product like a real user and tells you what to fix.",
+                "power_user": f"Crawl, fuzz, funnel analysis, and PR-ready patches in one pipeline.",
+                "enterprise_buyer": f"Evidence packs your design, PM, and eng leads can share with leadership.",
+            }
+        else:
+            templates = {
+                "skeptical_buyer": f"{text} — with proof",
+                "busy_professional": text.split(",")[0][:60],
+                "first_time_visitor": f"Simply put: {text[:80]}",
+                "power_user": text,
+                "enterprise_buyer": f"{text} — built for teams",
+            }
+
+        alt_text = templates.get(pid, text)
+        alts.append({
+            "profile_id": pid,
+            "profile_label": profile["label"],
+            "text": alt_text,
+            "rationale": f"Optimized for {profile['focus']}. Voice: {profile['voice']}. App tone: {voice['tone']}.",
+            "marketing_angle": profile["focus"].split(",")[0].strip(),
+        })
+
+    return alts
+
+
+async def _llm_alternatives(
+    db,
+    user_id: Optional[str],
+    block: dict[str, Any],
+    project: dict[str, Any],
+    app_type: str,
+) -> list[dict[str, Any]]:
+    try:
+        from user_llm_proxy import user_llm_json
+    except Exception:  # noqa: BLE001
+        return _deterministic_alternatives(block, app_type, project.get("name", ""))
+
+    voice = APP_TYPE_VOICE.get(app_type, APP_TYPE_VOICE["generic"])
+    profiles_blob = "\n".join(
+        f"- {p['id']}: {p['label']} — {p['focus']} ({p['voice']})" for p in MARKETING_PROFILES
+    )
+    prompt = (
+        f"Product: {project.get('name')} (type: {app_type})\n"
+        f"URL: {project.get('url')}\n"
+        f"App voice: {voice['tone']}. Avoid: {voice['avoid']}. CTA style: {voice['cta_style']}.\n"
+        f"Copy role: {block['role']}\n"
+        f"Current text: \"{block['text']}\"\n"
+        f"Marketing profiles:\n{profiles_blob}\n\n"
+        "You are a senior conversion copywriter. Marketing-first. Return ONLY minified JSON:\n"
+        '{"alternatives":[{"profile_id":"...","text":"...","rationale":"≤20 words","marketing_angle":"≤6 words"}]}\n'
+        "Give exactly one alternative per profile. Stronger than the original. JSON only."
+    )
+    uid = user_id or "system"
+    try:
+        data = await user_llm_json(
+            db, uid, prompt,
+            system="You are Atmos Copy — marketing-first conversion copywriter. JSON only.",
+            session_id=f"copy_{uuid.uuid4().hex[:8]}",
+        )
+        alts = data.get("alternatives") or []
+        if not alts:
+            return _deterministic_alternatives(block, app_type, project.get("name", ""))
+        # Enrich labels
+        by_id = {p["id"]: p for p in MARKETING_PROFILES}
+        out = []
+        for a in alts:
+            pid = a.get("profile_id", "first_time_visitor")
+            p = by_id.get(pid, MARKETING_PROFILES[2])
