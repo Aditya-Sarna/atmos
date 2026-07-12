@@ -98,3 +98,102 @@ function architectureText(value) {
   if (typeof value === "object") {
     return [value.title, value.name, value.label, value.summary, value.detail, value.takeaway, value.what_they_do_better, value.what_to_copy, value.score]
       .filter((item) => item != null && item !== "")
+      .map(String)
+      .join(" · ");
+  }
+  return String(value);
+}
+
+export default function RunMonitor() {
+  const { runId } = useParams();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  const [run, setRun] = useState(null);
+  const [project, setProject] = useState(null);
+  const [events, setEvents] = useState([]);
+  const [done, setDone] = useState(false);
+  const feedRef = useRef(null);
+
+  // Hydrate from API once
+  useEffect(() => {
+    getRun(runId).then((r) => {
+      setRun(r.data.run);
+      setProject(r.data.project);
+      setEvents(r.data.events || []);
+      if (r.data.run?.status === "completed" || r.data.run?.status === "failed") {
+        setDone(true);
+      }
+    }).catch(() => navigate("/dashboard", { replace: true }));
+  }, [runId, navigate]);
+
+  // SSE
+  useEffect(() => {
+    const es = new EventSource(`${BACKEND_URL}/api/runs/${runId}/stream`, { withCredentials: true });
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        setEvents((prev) => {
+          if (prev.some((p) => p.seq === data.seq)) return prev;
+          return [...prev, data].sort((a, b) => a.seq - b.seq);
+        });
+      } catch {
+        /* ignore malformed event */
+      }
+    };
+    es.addEventListener("done", () => {
+      setDone(true);
+      getRun(runId).then((r) => setRun(r.data.run)).catch(() => {});
+      es.close();
+    });
+    es.onerror = () => { es.close(); };
+    return () => es.close();
+  }, [runId]);
+
+  // Auto-scroll log
+  useEffect(() => {
+    if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
+  }, [events]);
+
+  const logs = events.filter((e) => e.kind === "log");
+  const phases = events.filter((e) => e.kind === "phase");
+  const screenshots = events.filter((e) => e.kind === "screenshot");
+  const viewports = events.filter((e) => e.kind === "viewport");
+  const personas = events.filter((e) => e.kind === "persona");
+  const personaAnnotations = events.filter((e) => e.kind === "persona_annotation");
+  const funnelAnalysis = events.filter((e) => e.kind === "funnel_analysis").pop();
+  const customTests = events.filter((e) => e.kind === "custom_test");
+  const competitiveDiffs = events.filter((e) => e.kind === "competitive_diff");
+  const designTheory = events.filter((e) => e.kind === "design_theory").pop();
+  const designIssues = events.filter((e) => e.kind === "design_issue");
+  const dopamineAnalysis = events.filter((e) => e.kind === "dopamine_analysis").pop();
+  const testPlanEv = events.find((e) => e.kind === "test_plan");
+  const copySuggestions = events.filter((e) => e.kind === "copy_suggestion");
+  const copywritingReport = events.filter((e) => e.kind === "copywriting_report").pop()
+    || run?.summary?.copywriting
+    || null;
+  const demandReport = events.filter((e) => e.kind === "demand_report").pop()
+    || run?.summary?.demand_intelligence
+    || null;
+  const issues = events.filter((e) => e.kind === "issue");
+  const benchmarks = events.filter((e) => e.kind === "benchmark");
+  const summary = events.find((e) => e.kind === "summary");
+  const focusEv = events.find((e) => e.kind === "plan");
+  const focusAreas = focusEv?.focus_areas || [];
+
+  // The latest live JPEG frame published by the engine (crawl, fuzz, etc.)
+  const liveFrames = events.filter((e) => e.kind === "live_frame");
+  const latestFrame = liveFrames[liveFrames.length - 1];
+  const routeVideos = events.filter((e) => e.kind === "route_video");
+
+  // Screens discovered by the agentic flow explorer (onboarding → hub → fan-out).
+  const screensDiscovered = events.filter((e) => e.kind === "screen_discovered");
+
+  // Per-screen test cases (each carries its own video clip), grouped by screen.
+  const screenTestGroups = useMemo(() => {
+    const groups = new Map();
+    for (const ev of events) {
+      if (ev.kind !== "screen_test") continue;
+      const key = ev.screen_name || ev.screen_id || "Screen";
+      if (!groups.has(key)) {
+        groups.set(key, { name: key, purpose: ev.screen_purpose || "", route: ev.route, cases: [] });
