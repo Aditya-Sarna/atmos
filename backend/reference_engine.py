@@ -87,3 +87,92 @@ def _parse_mobbin_html(html: str, limit: int = 8) -> list[dict[str, Any]]:
             })
         if len(refs) >= limit:
             break
+    return refs[:limit]
+
+
+def _parse_pinterest_html(html: str, query: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Extract pin descriptions from Pinterest search HTML."""
+    refs: list[dict[str, Any]] = []
+    for m in re.finditer(r'"description":"([^"]{15,200})"', html):
+        desc = m.group(1).encode().decode("unicode_escape") if "\\u" in m.group(1) else m.group(1)
+        refs.append({
+            "source": "pinterest",
+            "category": query.replace(" ", "_"),
+            "app": "Pinterest",
+            "pattern": desc,
+            "image_url": None,
+            "tags": [query.split()[0] if query else "generic"],
+        })
+        if len(refs) >= limit:
+            break
+    # Fallback: og descriptions
+    if not refs:
+        for m in re.finditer(r'content="([^"]{20,180})"\s+property="og:description"', html):
+            refs.append({
+                "source": "pinterest",
+                "category": query.replace(" ", "_"),
+                "app": "Pinterest",
+                "pattern": m.group(1),
+                "image_url": None,
+                "tags": ["generic"],
+            })
+            if len(refs) >= limit:
+                break
+    return refs[:limit]
+
+
+async def scrape_mobbin_patterns(category: str = "checkout", limit: int = 6) -> list[dict[str, Any]]:
+    """Scrape Mobbin public content; fall back to seed library."""
+    urls = [
+        f"https://mobbin.com/search/apps/web?query={quote_plus(category)}",
+        "https://mobbin.com/browse/ios/apps",
+    ]
+    scraped: list[dict[str, Any]] = []
+    for url in urls:
+        try:
+            html = await _fetch_html(url)
+            if html:
+                scraped.extend(_parse_mobbin_html(html, limit))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("mobbin scrape failed %s: %s", url, exc)
+        if len(scraped) >= limit:
+            break
+
+    if not scraped:
+        scraped = [r for r in SEED_REFERENCES if r["source"] == "mobbin" and (
+            category in r.get("category", "") or category in " ".join(r.get("tags", []))
+        )][:limit]
+    if not scraped:
+        scraped = [r for r in SEED_REFERENCES if r["source"] == "mobbin"][:limit]
+
+    for r in scraped:
+        r["ref_id"] = f"ref_{uuid.uuid4().hex[:8]}"
+        r["scraped_at"] = datetime.now(timezone.utc).isoformat()
+    return scraped
+
+
+async def scrape_pinterest_patterns(query: str = "mobile app ui design", limit: int = 6) -> list[dict[str, Any]]:
+    """Scrape Pinterest search; fall back to seed library."""
+    url = f"https://www.pinterest.com/search/pins/?q={quote_plus(query)}"
+    scraped: list[dict[str, Any]] = []
+    try:
+        html = await _fetch_html(url)
+        if html:
+            scraped = _parse_pinterest_html(html, query, limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pinterest scrape failed: %s", exc)
+
+    if not scraped:
+        scraped = [dict(r) for r in SEED_REFERENCES if r["source"] == "pinterest"][:limit]
+
+    for r in scraped:
+        r["ref_id"] = r.get("ref_id") or f"ref_{uuid.uuid4().hex[:8]}"
+        r["scraped_at"] = datetime.now(timezone.utc).isoformat()
+    return scraped
+
+
+async def ensure_reference_cache(db, app_type: str = "generic") -> list[dict[str, Any]]:
+    """Populate Mongo cache if stale (>24h) or empty."""
+    cache_key = f"refs_{app_type}"
+    cached = await db.ui_references.find_one({"cache_key": cache_key}, {"_id": 0})
+    if cached and cached.get("references"):
