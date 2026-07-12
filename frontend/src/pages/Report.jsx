@@ -331,3 +331,89 @@ export default function Report() {
         {s.design_theory?.score != null && (
           <div className="mt-10 card-elev p-6" data-testid="report-design">
             <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Design theory</div>
+            <h2 className="font-display text-2xl tracking-tight font-medium mb-2">
+              {s.design_theory.theme_label || "Theme"} · {s.design_theory.score}/100
+            </h2>
+            <p className="text-sm text-[#86868B] mb-3">{s.design_theory.issue_count || 0} fundamentals issue(s)</p>
+            <div className="space-y-2">
+              {(s.design_theory.issues || s.design_theory.findings || []).slice(0, 6).map((d, i) => (
+                <div key={i} className="text-sm border-b border-black/5 pb-2">
+                  <span className="font-medium">{d.title || d.name || d.check}</span>
+                  <span className="text-[#86868B]"> — {d.detail || d.recommendation || d.message}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Competitive diffs */}
+        {Array.isArray(s.competitive_diffs) && s.competitive_diffs.length > 0 && (
+          <div className="mt-10" data-testid="report-competitive">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Competitive UX</div>
+            <h2 className="font-display text-2xl tracking-tight font-medium mb-5">Side-by-side vs peers</h2>
+            <div className="grid md:grid-cols-2 gap-4">
+              {s.competitive_diffs.slice(0, 4).map((c, i) => (
+                <div key={i} className="card-elev p-4">
+                  <div className="text-sm font-medium mb-2">{c.competitor || c.name || `Peer ${i + 1}`}</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {c.your_url || c.yours ? <img alt="yours" className="rounded-lg border border-black/5" src={c.your_url || c.yours} /> : null}
+                    {c.their_url || c.theirs ? <img alt="peer" className="rounded-lg border border-black/5" src={c.their_url || c.theirs} /> : null}
+                  </div>
+                  {c.insight && <p className="text-xs text-[#86868B] mt-2">{c.insight}</p>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Copywriting */}
+        {s.copywriting?.alternatives?.length > 0 && (
+          <div className="mt-10 card-elev p-6" data-testid="report-copy">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Copywriting</div>
+            <h2 className="font-display text-2xl tracking-tight font-medium mb-3">Marketing alternatives</h2>
+            <p className="text-sm text-[#86868B] mb-4">{s.copywriting.summary}</p>
+            <div className="space-y-3">
+              {s.copywriting.alternatives.slice(0, 6).map((a, i) => (
+                <div key={i} className="rounded-xl bg-[#F5F5F7] p-3 text-sm">
+                  <div className="text-[10px] uppercase tracking-wider text-[#86868B]">{a.profile || a.role || "alt"}</div>
+                  <div className="mt-1">{a.text || a.alternative || a.copy}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Demand intelligence */}
+        {(s.demand_intelligence?.executive_summary || s.demand_intelligence?.top_gaps?.length > 0) && (
+          <div className="mt-10 card-elev p-6" data-testid="report-demand">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Demand intelligence</div>
+            <h2 className="font-display text-2xl tracking-tight font-medium mb-3">What the market is asking for</h2>
+            <p className="text-sm leading-relaxed mb-4">{s.demand_intelligence.executive_summary}</p>
+            {(s.demand_intelligence.proposed_features || []).slice(0, 3).map((f) => (
+              <div key={f.slug || f.title} className="mb-3 rounded-xl border border-black/5 p-4">
+                <div className="flex justify-between gap-2">
+                  <span className="font-medium">{f.title}</span>
+                  <span className="text-[10px] uppercase tracking-wider text-[#FF9500]">Tier {f.tier}</span>
+                </div>
+              </div>
+            ))}
+            {(s.demand_intelligence.top_gaps || []).slice(0, 5).map((g, i) => (
+              <div key={i} className="text-sm border-b border-black/5 py-2 flex justify-between">
+                <span>{g.feature || g.label}</span>
+                <span className="text-[#86868B] font-mono text-xs">Tier {g.tier} · {g.mentions}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Dopamine + dark patterns */}
+        {(s.dopamine?.dark_patterns?.length > 0
+          || s.dopamine?.dark_pattern_suggestions?.length > 0
+          || s.dopamine?.suggestions?.length > 0) && (
+          <div className="mt-10" data-testid="report-dopamine">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Engagement & dark patterns</div>
+            <h2 className="font-display text-2xl tracking-tight font-medium mb-2">
+              Dark-pattern score {s.dopamine.dark_pattern_score ?? "—"}/100
+              {s.dopamine.verdict && (
+                <span className="text-base text-[#86868B] font-normal ml-2">· {s.dopamine.verdict}</span>
+              )}
