@@ -273,3 +273,13 @@ export default function IssueDiffCard({ issue, runId }) {
                     <span className="font-medium text-[#0071E3]">{ref.source}</span>
                     <span>· {ref.app}</span>
                   </div>
+                  <p className="text-sm mt-1 leading-snug">{ref.pattern}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
