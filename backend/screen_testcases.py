@@ -289,3 +289,81 @@ async def _run_case_with_video(
             "value": value_disp,
             "expectation": case.get("expectation"),
             "rationale": case.get("rationale", ""),
+            "verdict": verdict,
+            "source": case.get("source", "deterministic"),
+            "video_url": video_url,
+            "screenshot_url": screenshot_url,
+            "viewport": vp_label,
+        })
+
+    return {**done, "screen_name": screen.get("name"), "field": field,
+            "value": value_disp, "rationale": case.get("rationale", ""),
+            "video_url": video_url, "screenshot_url": screenshot_url}
+
+
+# ---------------------------------------------------------------------------
+# Public entry-point
+# ---------------------------------------------------------------------------
+
+
+async def generate_and_run_screen_tests(
+    browser: Browser,
+    screens: list[dict[str, Any]],
+    run_id: str,
+    project: dict[str, Any],
+    *,
+    on_progress=None,
+    viewport: Optional[dict[str, Any]] = None,
+    db=None,
+) -> list[dict[str, Any]]:
+    vp = viewport or VIEWPORTS[0]
+    results: list[dict[str, Any]] = []
+    total = 0
+
+    for screen in screens:
+        if total >= MAX_TOTAL_CASES:
+            break
+        if not screen.get("fields"):
+            continue  # no inputs to probe on this screen
+
+        brief = await _llm_screen_brief(project, screen, db=db)
+        if brief.get("purpose"):
+            screen["purpose"] = brief["purpose"]
+        elif not screen.get("purpose"):
+            screen["purpose"] = (screen.get("heading") or screen.get("name") or "").strip()
+
+        cases = _merge_cases(screen, brief)
+        if not cases:
+            continue
+
+        if on_progress:
+            try:
+                await on_progress({
+                    "type": "screen_context",
+                    "screen_id": screen.get("screen_id"),
+                    "screen_name": screen.get("name"),
+                    "purpose": screen.get("purpose", ""),
+                    "route": screen.get("route"),
+                    "field_count": len(screen.get("fields", [])),
+                    "planned_cases": len(cases),
+                })
+            except Exception:  # noqa: BLE001
+                pass
+
+        for case in cases:
+            if total >= MAX_TOTAL_CASES:
+                break
+            total += 1
+            try:
+                res = await asyncio.wait_for(
+                    _run_case_with_video(browser, screen, case, run_id, vp, on_progress),
+                    timeout=CASE_TIMEOUT_SECS,
+                )
+                results.append(res)
+            except asyncio.TimeoutError:
+                logger.warning("screen test timed out: %s / %s", screen.get("name"), case.get("name"))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("screen test errored: %s", exc)
+
+    logger.info("Screen tests: ran %d cases across %d screens", len(results), len(screens))
+    return results
