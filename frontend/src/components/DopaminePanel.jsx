@@ -81,3 +81,86 @@ export default function DopaminePanel({ analysis, fromSummary }) {
             {darkSuggestions.map((s, i) => (
               <div key={s.id || i} className="rounded-xl border border-[#FF3B30]/15 bg-[#F5F5F7] p-4">
                 <div className="font-medium text-sm">{s.name}</div>
+                <div className="text-[10px] uppercase tracking-wider text-[#86868B] mt-0.5">
+                  missing · {s.category}
+                </div>
+                <p className="text-xs text-[#1D1D1F]/70 mt-2">{s.conversion_claim}</p>
+                <p className="text-sm mt-2"><span className="text-[#86868B]">How rivals do it: </span>{s.how}</p>
+                <p className="text-xs text-[#86868B] mt-1">Where: {s.where}</p>
+                <p className="text-xs text-[#FF3B30] mt-2">Risk: {s.risk}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="grid lg:grid-cols-2 gap-4">
+        <div className="card-elev p-6" data-testid="dark-patterns-list">
+          <div className="flex items-center gap-2 mb-4">
+            <ShieldAlert className="h-4 w-4 text-[#FF3B30]" />
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B]">Detected on page ({dark.length})</div>
+          </div>
+          {dark.length === 0 ? (
+            <div className="flex items-start gap-2 text-sm text-[#34C759]">
+              <CheckCircle2 className="h-4 w-4 mt-0.5 shrink-0" />
+              No deceptive-design signals detected on this page.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {dark.map((d, i) => (
+                <div key={d.id || i} className="rounded-xl border border-black/5 bg-[#F5F5F7] p-4">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" style={{ color: SEV[d.severity] || SEV.medium }} />
+                    <div>
+                      <div className="font-medium text-sm">{d.name}</div>
+                      <div className="text-[10px] uppercase tracking-wider text-[#86868B] mt-0.5">
+                        {d.severity} · {d.category}
+                      </div>
+                      {d.evidence && (
+                        <div className="mt-2 font-mono text-[11px] text-[#1D1D1F]/70 bg-white rounded-lg px-2 py-1 border border-black/5">
+                          “{d.evidence}”
+                        </div>
+                      )}
+                      <p className="text-sm text-[#1D1D1F]/75 mt-2">{d.recommendation}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="card-elev p-6" data-testid="engagement-suggestions">
+          <div className="flex items-center gap-2 mb-4">
+            <Sparkles className="h-4 w-4 text-[#0071E3]" />
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B]">
+              Ethical engagement ({suggestions.length})
+            </div>
+          </div>
+          {suggestions.length === 0 ? (
+            <p className="text-sm text-[#86868B]">No engagement gaps flagged.</p>
+          ) : (
+            <div className="space-y-3">
+              {suggestions.map((s, i) => (
+                <div key={s.id || i} className="rounded-xl border border-black/5 p-4">
+                  <div className="font-medium text-sm">{s.title}</div>
+                  <div className="text-[10px] uppercase tracking-wider text-[#86868B] mt-0.5">
+                    {s.impact} impact · {s.kind || "engagement"}
+                  </div>
+                  <p className="text-xs text-[#86868B] mt-2">{s.thesis}</p>
+                  <p className="text-sm mt-1">{s.recommendation}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          {guardrails.length > 0 && (
+            <div className="mt-5 rounded-xl bg-[#FFF8E6] border border-[#FF9500]/20 p-3">
+              <div className="text-[10px] uppercase tracking-[0.15em] text-[#86868B] mb-1">Ethical guardrails</div>
+              <div className="text-xs text-[#1D1D1F]/80">Prefer: avoid {guardrails.join(" · ")}</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
