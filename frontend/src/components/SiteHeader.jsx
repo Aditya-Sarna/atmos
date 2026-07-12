@@ -29,6 +29,11 @@ export default function SiteHeader({ variant = "marketing" }) {
                   Dashboard
                 </Button>
               </Link>
+              <Link to="/team">
+                <Button variant="ghost" className="rounded-full" data-testid="header-team-btn">
+                  Team
+                </Button>
+              </Link>
               <Button
                 variant="outline"
                 className="rounded-full"
