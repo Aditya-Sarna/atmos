@@ -1272,3 +1272,90 @@ async def llm_analyze_app(project: dict[str, Any], command: str, pages: list[dic
         + "\n\nReturn the issues in JSON exactly per this schema. Make sure every issue's page_url "
           "matches one of the URLs above exactly.\n\n"
         + ISSUE_SCHEMA
+    )
+    user_id = project.get("user_id") or "user_local_dev"
+    if db is None:
+        raise RuntimeError("db required for IDE-funded LLM analysis")
+    return await user_llm_json(
+        db, user_id, prompt,
+        system=SYSTEM_PROMPT,
+        images_b64=images or None,
+        purpose="analyze_app",
+    )
+
+
+PAGE_ANALYSIS_SCHEMA = """\
+Return ONLY a minified JSON object with shape:
+{
+  "page_summary": "1-sentence description of what this page does and who it's for",
+  "issues": [
+    {
+      "category": "Visual"|"Accessibility"|"UX"|"Functional"|"Performance",
+      "severity": "critical"|"high"|"medium"|"low",
+      "title": "<80 chars",
+      "cause": "<140 chars",
+      "patch_css": "CSS that visibly fixes this when injected as <style>",
+      "patch_explanation": "1 sentence",
+      "alternatives": [
+        {"label": "<6 words", "summary": "<25 words", "tradeoff": "<20 words", "patch_css": "..."},
+        {"label": "<6 words", "summary": "<25 words", "tradeoff": "<20 words", "patch_css": "..."}
+      ]
+    }
+    ... 3-5 issues for THIS page only ...
+  ]
+}
+No markdown. JSON only."""
+
+
+async def llm_analyze_page(project: dict[str, Any], page: dict[str, Any], db=None) -> dict[str, Any]:
+    """Deep per-page analysis via the user's IDE LLM quota (vision + text fallback)."""
+    from user_llm_proxy import user_llm_json
+
+    images: list[str] = []
+    notes: list[str] = []
+    for vp_label, cap in page.get("captures", {}).items():
+        if not cap or not cap.get("ok"):
+            continue
+        path = SCREENSHOTS_DIR / Path(cap["url_path"]).name
+        if not path.exists():
+            continue
+        images.append(base64.b64encode(path.read_bytes()).decode("ascii"))
+        notes.append(f"- {vp_label} screenshot of {page['url']}")
+
+    user_id = project.get("user_id") or "user_local_dev"
+    if db is None:
+        raise RuntimeError("db required for IDE-funded LLM analysis")
+
+    if images:
+        prompt = (
+            f"Target product: {project['name']}\n"
+            f"URL of THIS page: {page['url']}\n"
+            f"Title: {page.get('title') or '—'}\n"
+            f"Screenshots attached:\n" + "\n".join(notes) + "\n\n"
+            f"List issues that exist ONLY on this page. " + PAGE_ANALYSIS_SCHEMA
+        )
+        try:
+            return await asyncio.wait_for(
+                user_llm_json(
+                    db, user_id, prompt,
+                    system=SYSTEM_PROMPT,
+                    images_b64=images[:3],
+                    purpose="analyze_page",
+                ),
+                timeout=120,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Vision analysis failed for %s (%s) — falling back to text", page["url"], exc)
+
+    route = page.get("route") or page["url"]
+    text_prompt = (
+        f"Product: {project['name']} (type: {project.get('app_type', 'generic')})\n"
+        f"Page URL: {page['url']}\n"
+        f"Route: {route}\n"
+        f"Title: {page.get('title') or '—'}\n"
+        f"Infer 3-5 realistic issues for this type of screen. " + PAGE_ANALYSIS_SCHEMA
+    )
+    try:
+        result = await asyncio.wait_for(
+            user_llm_json(
+                db, user_id, text_prompt,
