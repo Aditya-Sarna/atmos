@@ -3010,3 +3010,97 @@ async def api_ide_llm_pending(user: User = Depends(current_user), limit: int = 2
     )
     jobs = await claim_pending_jobs(db, user.user_id, limit=min(limit, 3))
     return {"jobs": jobs}
+
+
+@api.post("/ide/llm/jobs/{job_id}/complete")
+async def api_ide_llm_complete(job_id: str, body: IdeLlmCompleteBody, user: User = Depends(current_user)):
+    from ide_llm_bridge import complete_job
+    ok = await complete_job(
+        db, user.user_id, job_id,
+        result_text=body.result_text,
+        error=body.error,
+        model_used=body.model_used,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"ok": True, "job_id": job_id}
+
+
+# ----------------------------------------------------------------------------
+# Copywriting + Demand intelligence
+# ----------------------------------------------------------------------------
+
+
+class CopyRewriteBody(BaseModel):
+    text: str
+    role: str = "headline"
+    app_type: Optional[str] = None
+    project_name: Optional[str] = None
+
+
+@api.post("/projects/{project_id}/copywriting/analyze")
+async def api_copywriting_analyze(project_id: str, user: User = Depends(current_user)):
+    """Run marketing copy analysis against the project's live URL."""
+    await require_permission(db, user.user_id, "runs:start")
+    q = await project_query_for_user(db, user.user_id)
+    q["project_id"] = project_id
+    proj = await db.projects.find_one(q, {"_id": 0})
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from playwright.async_api import async_playwright as _ap
+    async with _ap() as pw:
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        try:
+            result = await analyze_copywriting(
+                browser, proj["url"], proj, f"adhoc_{uuid.uuid4().hex[:8]}",
+                db=db, user_id=user.user_id,
+            )
+        finally:
+            await browser.close()
+    await db.copywriting_reports.insert_one({
+        **result,
+        "project_id": project_id,
+        "user_id": user.user_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    result.pop("_id", None)
+    return result
+
+
+@api.post("/copywriting/rewrite")
+async def api_copy_rewrite(body: CopyRewriteBody, user: User = Depends(current_user)):
+    """Rewrite a single string for marketing profiles (no browser)."""
+    from copywriting_engine import _llm_alternatives, _score_copy, APP_TYPE_VOICE
+    app_type = body.app_type or "generic"
+    block = {"role": body.role, "text": body.text}
+    project = {"name": body.project_name or "Product", "url": "", "app_type": app_type}
+    alts = await _llm_alternatives(db, user.user_id, block, project, app_type)
+    scored = _score_copy(body.text, body.role, app_type)
+    return {
+        "original": body.text,
+        "role": body.role,
+        "score": scored,
+        "voice": APP_TYPE_VOICE.get(app_type, APP_TYPE_VOICE["generic"]),
+        "profiles": MARKETING_PROFILES,
+        "alternatives": alts,
+    }
+
+
+@api.post("/projects/{project_id}/demand/report")
+async def api_demand_report(project_id: str, user: User = Depends(current_user)):
+    """Build research-grade demand intelligence (keyword plan → scrape → insight .md)."""
+    await require_permission(db, user.user_id, "runs:read")
+    q = await project_query_for_user(db, user.user_id)
+    q["project_id"] = project_id
+    proj = await db.projects.find_one(q, {"_id": 0})
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+    report = await build_demand_report(
+        proj,
+        db=db,
+        user_id=user.user_id,
+        run_id=f"manual_{uuid.uuid4().hex[:8]}",
