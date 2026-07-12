@@ -473,3 +473,101 @@ def _suggest_missing_dark_patterns(
             "how": pat["how"],
             "where": pat["where"],
             "risk": pat["risk"],
+            "kind": "dark_pattern_suggestion",
+            "disclaimer": DARK_PATTERN_DISCLAIMER,
+        })
+    # Cap so the UI stays focused
+    priority = [
+        "fake_urgency", "confirmshaming", "prechecked_optin", "hidden_costs",
+        "forced_continuity", "misdirection", "roach_motel", "privacy_zuckering",
+        "countdown_timer", "social_proof_pressure", "disguised_ad", "trick_question",
+    ]
+    out.sort(key=lambda s: priority.index(s["pattern_id"]) if s["pattern_id"] in priority else 99)
+    return out[:8]
+
+
+def _dark_pattern_score(findings: list[dict[str, Any]]) -> int:
+    """100 = clean; lower as severity stacks. (Detected patterns only — not suggestions.)"""
+    if not findings:
+        return 100
+    penalty = 0
+    for f in findings:
+        sev = (f.get("severity") or "medium").lower()
+        penalty += {"critical": 18, "high": 12, "medium": 7, "low": 3}.get(sev, 5)
+    return max(20, 100 - penalty)
+
+
+async def analyze_dopamine_engagement(
+    browser: Browser,
+    target_url: str,
+    app_type: str,
+    *,
+    enabled: bool = True,
+    engagement_max: bool = False,
+    on_progress: Optional[ProgressFn] = None,
+) -> dict[str, Any]:
+    """Run engagement signals + dark-pattern detect + missing-pattern suggestions."""
+    if not enabled:
+        return {
+            "enabled": False,
+            "suggestions": [],
+            "dark_patterns": [],
+            "dark_pattern_suggestions": [],
+            "disclaimer": DARK_PATTERN_DISCLAIMER,
+        }
+
+    vp = VIEWPORTS[-1]
+    ctx = await _new_context(browser, vp)
+    page = await ctx.new_page()
+    try:
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        await _settle(page)
+        signals = await _audit_engagement_signals(page)
+        dark_patterns = await _audit_dark_patterns(page)
+        dark_suggestions = _suggest_missing_dark_patterns(dark_patterns, app_type, signals=signals)
+        suggestions = _generate_suggestions(signals, app_type, engagement_max=engagement_max)
+        profile = DOPAMINE_PROFILES.get(app_type, DOPAMINE_PROFILES["generic"])
+        dp_score = _dark_pattern_score(dark_patterns)
+
+        dark_issues = [
+            {
+                "id": f"dp_{d.get('id')}",
+                "category": "Dark pattern",
+                "severity": d.get("severity") or "medium",
+                "title": d.get("name"),
+                "cause": d.get("evidence") or "",
+                "recommendation": d.get("recommendation"),
+                "pattern_category": d.get("category"),
+            }
+            for d in dark_patterns
+        ]
+
+        result = {
+            "enabled": True,
+            "engagement_max": engagement_max,
+            "profile": profile["label"],
+            "signals": signals,
+            "suggestions": suggestions,
+            "dark_patterns": dark_patterns,
+            "dark_pattern_suggestions": dark_suggestions,
+            "dark_pattern_issues": dark_issues,
+            "dark_pattern_score": dp_score,
+            "disclaimer": DARK_PATTERN_DISCLAIMER,
+            "ethical_guardrails": profile.get("avoid", []),
+            "thesis_summary": (
+                "Ethical engagement + deceptive-design map. "
+                f"{len(dark_patterns)} present · {len(dark_suggestions)} missing suggestions "
+                f"(awareness only) · score {dp_score}/100."
+            ),
+            "verdict": (
+                "clean" if dp_score >= 90
+                else "watch" if dp_score >= 70
+                else "risky" if dp_score >= 50
+                else "hostile"
+            ),
+        }
+        if on_progress:
+            await on_progress({"type": "dopamine_analysis", **result})
+        return result
+    finally:
+        await ctx.close()
