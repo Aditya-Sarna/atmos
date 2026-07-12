@@ -212,3 +212,80 @@ async def _run_case_with_video(
                                "step": steps[1], "viewport": vp_label})
         sel = case.get("selector")
         filled = await _fill_field(page, sel, value) if sel else False
+        try:
+            await page.keyboard.press("Tab")
+        except Exception:  # noqa: BLE001
+            pass
+        if on_progress:
+            await on_progress({"type": "test_case_step", "case_id": case_id, "step_index": 2,
+                               "step": steps[2], "viewport": vp_label})
+        await _click_first_cta(page, SUBMIT_CTAS)
+        await page.wait_for_timeout(500)
+        outcome = await _detect_validation_outcome(page)
+        verdict = _grade(case.get("expectation", "accept_but_warn"), outcome) if filled else "warn"
+
+        # Screenshot of the result.
+        fname = f"{run_id}_screentest_{case_id}.jpg"
+        try:
+            png = await page.screenshot(full_page=False, type="jpeg", quality=72, timeout=5000)
+            (SCREENSHOTS_DIR / fname).write_bytes(png)
+            screenshot_url = f"/api/screens/{fname}"
+            if on_progress:
+                await on_progress({"type": "live_frame", "kind": "screen_test",
+                                   "label": f"{screen.get('name')}: {case.get('name')}",
+                                   "image_b64": base64.b64encode(png).decode("ascii"),
+                                   "screenshot_url": screenshot_url})
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Finalize the video (must close the page first).
+        try:
+            video = page.video
+            await page.close()
+            if video:
+                raw = await video.path()
+                if raw and Path(raw).exists():
+                    vname = f"{run_id}_screentest_{case_id}_{_safe_name(vp_label)}.webm"
+                    (SCREENSHOTS_DIR / vname).write_bytes(Path(raw).read_bytes())
+                    video_url = f"/api/screens/{vname}"
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("case run failed (%s): %s", case.get("name"), exc)
+    finally:
+        try:
+            await page.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await ctx.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    rejected = bool(outcome.get("visible_error") or outcome.get("invalid_count") or outcome.get("aria_invalid"))
+    explanation = (
+        f"Expected the screen to {case.get('expectation', 'handle this')}. "
+        + ("The app showed a validation error / rejected the input."
+           if rejected else "The app accepted the input without complaint.")
+        + (f" Errors: {' | '.join(outcome.get('error_texts', [])[:2])}" if outcome.get("error_texts") else "")
+    )
+
+    done = {
+        "id": case_id, "name": case.get("name"), "category": "Screen test",
+        "steps": steps, "status": verdict, "expected_result": case.get("expectation"),
+        "explanation": explanation,
+    }
+    if on_progress:
+        await on_progress({"type": "test_case", "phase": "end", **done})
+        await on_progress({
+            "type": "screen_test",
+            "id": case_id,
+            "screen_id": screen.get("screen_id"),
+            "screen_name": screen.get("name"),
+            "screen_purpose": screen.get("purpose", ""),
+            "route": screen.get("route"),
+            "field": field,
+            "case_name": case.get("name"),
+            "value": value_disp,
+            "expectation": case.get("expectation"),
+            "rationale": case.get("rationale", ""),
