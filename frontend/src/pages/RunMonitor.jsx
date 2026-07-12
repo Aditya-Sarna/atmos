@@ -692,3 +692,102 @@ export default function RunMonitor() {
             </TabsContent>
 
             {/* ISSUES (diff cards) — optionally filtered by selected page */}
+            <TabsContent value="issues" className="space-y-4 mt-4" data-testid="tab-issues-content">
+              {appPages.length > 1 && (
+                <div className="card-elev p-3 flex items-center gap-2 flex-wrap" data-testid="issue-page-filter">
+                  <span className="text-[10px] uppercase tracking-[0.18em] text-[#86868B] mr-1">Filter by page</span>
+                  <button
+                    type="button"
+                    onClick={() => setIssuePageFilter(null)}
+                    className={`text-xs rounded-full px-3 py-1 ${issuePageFilter === null ? "bg-[#1D1D1F] text-white" : "bg-white border border-black/10"}`}
+                    data-testid="issue-filter-all"
+                  >
+                    All ({issues.length})
+                  </button>
+                  {appPages.map((p) => {
+                    const n = issues.filter((i) => i.page_url === p.url).length;
+                    if (n === 0) return null;
+                    return (
+                      <button
+                        key={p.url}
+                        type="button"
+                        onClick={() => setIssuePageFilter(p.url)}
+                        className={`text-xs rounded-full px-3 py-1 truncate max-w-[260px] ${issuePageFilter === p.url ? "bg-[#1D1D1F] text-white" : "bg-white border border-black/10"}`}
+                        data-testid={`issue-filter-${p.slug}`}
+                      >
+                        {p.title || p.url} <span className="opacity-60 ml-1">({n})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {issues.length === 0 ? (
+                <div className="card-elev p-10 text-center text-sm text-[#86868B]">Atmos hasn&apos;t surfaced issues yet — they appear here with before / after diffs.</div>
+              ) : (
+                issues
+                  .filter((iss) => !issuePageFilter || iss.page_url === issuePageFilter)
+                  .map((iss) => <IssueDiffCard key={iss.id} issue={iss} runId={runId} />)
+              )}
+            </TabsContent>
+
+            {/* FUZZ */}
+            <TabsContent value="fuzz" className="space-y-3 mt-4" data-testid="tab-fuzz-content">
+              {fuzzCases.length === 0 ? (
+                <div className="card-elev p-10 text-center text-sm text-[#86868B]">
+                  No fuzz cases yet — Atmos starts firing boundary inputs (age=−5, dob=2026, 10k-char strings, SQL/XSS payloads, emoji bombs…) once it has finished crawling.
+                </div>
+              ) : (
+                <FuzzCaseList cases={fuzzCases} />
+              )}
+            </TabsContent>
+
+            {/* CHAOS LAB */}
+            <TabsContent value="chaos" className="space-y-3 mt-4" data-testid="tab-chaos-content">
+              <ChaosLabPanel
+                runId={runId}
+                projectId={project?.project_id}
+                pages={appPages}
+              />
+            </TabsContent>
+
+            {/* DOPAMINE + DARK PATTERNS */}
+            <TabsContent value="dopamine" className="space-y-3 mt-4" data-testid="tab-dopamine-content">
+              <DopaminePanel
+                analysis={dopamineAnalysis}
+                fromSummary={summary?.dopamine}
+              />
+            </TabsContent>
+
+            {/* ARCHITECTURE */}
+            <TabsContent value="architecture" className="space-y-3 mt-4" data-testid="tab-architecture-content">
+              {!architecture ? (
+                <div className="card-elev p-10 text-center text-sm text-[#86868B]">
+                  Architecture analysis runs in the final phase of every test run. It will appear here once the run reaches the Architecture phase.
+                </div>
+              ) : (
+                <ArchitecturePanel arch={architecture} runId={runId} />
+              )}
+            </TabsContent>
+
+            {/* COPYWRITING */}
+            <TabsContent value="copy" className="space-y-4 mt-4" data-testid="tab-copy-content">
+              {(copywritingReport || copySuggestions.length > 0) ? (
+                <>
+                  {copywritingReport && (
+                    <div className="card-elev p-5 flex items-center justify-between gap-4 flex-wrap">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B]">Marketing copy score</div>
+                        <div className="font-display text-3xl mt-1 tabular-nums">{copywritingReport.avg_score}/100</div>
+                        <p className="text-sm text-[#86868B] mt-1 max-w-xl">{copywritingReport.summary}</p>
+                      </div>
+                      <div className="text-xs text-[#86868B]">
+                        Voice: {copywritingReport.voice?.tone || "—"}
+                      </div>
+                    </div>
+                  )}
+                  {(copySuggestions.length ? copySuggestions : copywritingReport?.suggestions || []).map((c) => (
+                    <div key={c.id || c.seq} className="card-elev p-5 space-y-3" data-testid={`copy-card-${c.id || c.seq}`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <span className="text-[10px] uppercase tracking-[0.18em] text-[#86868B]">{c.role}</span>
+                          <div className="font-medium mt-1 text-[#1D1D1F]/50 line-through decoration-black/20">{c.original}</div>
