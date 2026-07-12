@@ -103,3 +103,108 @@ async def _execute_step(page: Page, step: dict[str, Any], base_url: str) -> dict
         raise ValueError(f"Unknown action: {action}")
 
     return result
+
+
+async def run_custom_test_case(
+    browser: Browser,
+    base_url: str,
+    case: dict[str, Any],
+    run_id: str,
+    *,
+    on_progress: Optional[ProgressFn] = None,
+    viewport_label: str = "Desktop 1440",
+) -> dict[str, Any]:
+    """Run one user-defined test case; record full session as .webm."""
+    case_id = case.get("case_id") or case.get("id") or f"ctc_{uuid.uuid4().hex[:8]}"
+    name = case.get("name", "Custom test")
+    steps = case.get("steps") or []
+    vp = next((v for v in VIEWPORTS if v["label"] == viewport_label), VIEWPORTS[-1])
+
+    slug = _safe_name(f"custom_{case_id}")
+    video_name = f"{run_id}_{slug}.webm"
+
+    ctx = await _new_context(browser, vp, record_video=True, record_dir=SCREENSHOTS_DIR)
+    page = await ctx.new_page()
+    step_results: list[dict[str, Any]] = []
+    overall = "pass"
+
+    try:
+        if on_progress:
+            await on_progress({
+                "type": "custom_test_start",
+                "case_id": case_id,
+                "name": name,
+                "steps": [s.get("description") or s.get("action", "") for s in steps],
+            })
+
+        for idx, step in enumerate(steps):
+            step_desc = step.get("description") or f"{step.get('action')} {step.get('selector') or step.get('url') or ''}"
+            if on_progress:
+                await on_progress({
+                    "type": "custom_test_step",
+                    "case_id": case_id,
+                    "step_index": idx,
+                    "step": step_desc,
+                    "status": "running",
+                })
+            try:
+                sr = await _execute_step(page, step, base_url)
+                sr["step_index"] = idx
+                sr["description"] = step_desc
+                step_results.append(sr)
+                if sr["status"] == "fail":
+                    overall = "fail"
+                shot_name = f"{run_id}_{slug}_step{idx}.png"
+                await page.screenshot(path=str(SCREENSHOTS_DIR / shot_name), full_page=False)
+                if on_progress:
+                    await on_progress({
+                        "type": "custom_test_step",
+                        "case_id": case_id,
+                        "step_index": idx,
+                        "step": step_desc,
+                        "status": sr["status"],
+                        "screenshot_url": f"/api/screens/{shot_name}",
+                        "detail": sr.get("detail"),
+                    })
+            except Exception as exc:  # noqa: BLE001
+                overall = "fail"
+                step_results.append({
+                    "step_index": idx,
+                    "description": step_desc,
+                    "status": "fail",
+                    "detail": str(exc),
+                })
+                if on_progress:
+                    await on_progress({
+                        "type": "custom_test_step",
+                        "case_id": case_id,
+                        "step_index": idx,
+                        "step": step_desc,
+                        "status": "fail",
+                        "detail": str(exc),
+                    })
+                if not step.get("optional"):
+                    break
+
+        await page.close()
+        video_path = await page.video.path() if page.video else None
+        video_url = f"/api/screens/{video_name}" if video_path and Path(video_path).exists() else None
+
+        result = {
+            "case_id": case_id,
+            "name": name,
+            "status": overall,
+            "video_url": video_url,
+            "step_results": step_results,
+            "steps_passed": sum(1 for s in step_results if s.get("status") == "pass"),
+            "steps_total": len(steps),
+            "source": "custom",
+        }
+        if on_progress:
+            await on_progress({"type": "custom_test_complete", **result})
+        return result
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("custom test %s failed: %s", case_id, exc)
+        try:
+            await page.close()
