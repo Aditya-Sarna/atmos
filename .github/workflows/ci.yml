@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps (skip private emergent package)
+        run: |
+          grep -v '^emergentintegrations' requirements.txt > /tmp/req.txt
+          pip install -r /tmp/req.txt
+          pip install pytest
+      - name: Syntax check
+        run: |
+          python - <<'PY'
+          import ast, pathlib
+          root = pathlib.Path(".")
+          bad = []
+          for p in root.glob("*.py"):
+              try:
+                  ast.parse(p.read_text())
+              except SyntaxError as e:
+                  bad.append(f"{p}: {e}")
+          if bad:
+              raise SystemExit("\n".join(bad))
+          print("ok", len(list(root.glob('*.py'))), "modules")
+          PY
+      - name: Unit tests (craft / dopamine / chaos)
+        run: |
+          python -m pytest tests/test_craft_score.py tests/test_dopamine.py tests/test_chaos_lab.py -q
+      - name: Import smoke
+        run: |
+          python -c "from command_profiles import get_command_profile; print(get_command_profile('/atmos accessibility')['label'])"
+          python -c "from craft_score import CRAFT_VERSION, WEIGHTS; assert abs(sum(WEIGHTS.values())-1)<1e-9; print(CRAFT_VERSION)"
+          python -c "from tenant_guard import require_run_for_user; from ops import RequestIdMiddleware; print('ok')"
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+        env:
+          CI: "true"
+          REACT_APP_BACKEND_URL: http://localhost:8000
+          REACT_APP_DISABLE_AUTH: "1"
