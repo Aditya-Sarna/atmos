@@ -663,3 +663,90 @@ async def _perform_context_action(
     """
     action = _infer_route_action(route, context_hint)
     filled = await _fill_visible_forms(page)
+
+    cta_by_action: dict[str, list[str]] = {
+        "submit_payment": ["send", "pay", "continue", "next", "confirm", "submit"],
+        "receive_flow": ["receive", "request", "generate", "continue"],
+        "auth_flow": ["sign in", "login", "continue", "next", "unlock", "get started"],
+        "settings_flow": ["save", "update", "enable", "backup", "continue"],
+        "scan_flow": ["scan", "open camera", "continue", "allow"],
+        "generic": ["continue", "next", "submit", "save", "confirm"],
+    }
+    clicked = None
+    for label in cta_by_action.get(action, cta_by_action["generic"]):
+        ok = await _click_button_by_text(page, label)
+        if ok:
+            clicked = label
+            try:
+                await page.wait_for_load_state("networkidle", timeout=2200)
+            except Exception:  # noqa: BLE001
+                pass
+            await page.wait_for_timeout(300)
+            break
+
+    return {
+        "action": action,
+        "filled_fields": filled,
+        "clicked_cta": clicked,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Crawl
+# ---------------------------------------------------------------------------
+
+
+async def _emit_frame(on_progress, page: Page, label: str, kind: str = "live") -> None:
+    """Capture a small JPEG of the current viewport and publish as a live-stream frame."""
+    if not on_progress:
+        return
+    try:
+        png = await page.screenshot(full_page=False, type="jpeg", quality=72, timeout=4000)
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        await on_progress({
+            "type": "live_frame",
+            "kind": kind,
+            "label": label,
+            "image_b64": base64.b64encode(png).decode("ascii"),
+        })
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def crawl_and_capture(browser: Browser, start_url: str, run_id: str, on_progress=None) -> dict[str, Any]:
+    """Discover up to MAX_PAGES same-origin pages and capture each one at
+    every viewport. The discovery pass now actually CLICKS visible safe
+    buttons to surface modals / route changes that don't have an <a> tag.
+
+    Returns {pages, button_actions}.
+    """
+    start_norm = _normalize(start_url)
+    discovered_urls: list[str] = [start_norm]
+    button_actions: list[dict[str, Any]] = []
+
+    # ── 1) Interactive discovery on a single desktop context ───────────
+    discovery_ctx = await _new_context(browser, VIEWPORTS[1])  # Desktop for richer link harvest
+    discovery_page = await discovery_ctx.new_page()
+    explored_urls: set[str] = set()
+
+    # Track ALL URL changes emitted by pushState / hash navigation / redirects.
+    nav_discovered: list[str] = []
+
+    def _on_frame_navigated(frame) -> None:  # noqa: ANN001
+        try:
+            if frame == discovery_page.main_frame:
+                u = _normalize(frame.url)
+                if u and _same_origin(start_url, u) and u not in discovered_urls and u not in nav_discovered:
+                    nav_discovered.append(u)
+        except Exception:  # noqa: BLE001
+            pass
+
+    discovery_page.on("framenavigated", _on_frame_navigated)
+
+    try:
+        while len(explored_urls) < len(discovered_urls) and len(discovered_urls) < MAX_PAGES * 2:
+            current_url = next((u for u in discovered_urls if u not in explored_urls), None)
+            if not current_url:
+                break
