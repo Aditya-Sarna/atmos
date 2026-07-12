@@ -562,3 +562,40 @@ async def llm_peer_comparison(project_name: str, archetype: str, scan: dict[str,
             prompt,
             system=(
                 "You are an enterprise software architect. Compare a submitted repo's architecture to "
+                "well-known industry peers. Return ONLY JSON."
+            ),
+            purpose="arch_peer",
+        )
+        if isinstance(data, dict):
+            return data
+        return {"peers": [], "summary": "", "next_3_moves": []}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM peer comparison failed: %s", exc)
+        return {"peers": [], "summary": "", "next_3_moves": []}
+
+
+# ---------------------------------------------------------------------------
+# Public entry-point
+# ---------------------------------------------------------------------------
+
+
+async def analyze_repo(repo_root: Path, project_name: str, archetype: str, db=None, user_id: Optional[str] = None) -> dict[str, Any]:
+    scan = static_scan(repo_root)
+    score = score_architecture(scan)
+    suggestions = deterministic_suggestions(scan, score)
+    peer = await llm_peer_comparison(project_name, archetype, scan, score, db=db, user_id=user_id)
+    return {
+        "scan": scan,
+        "score": score,
+        "suggestions": suggestions,
+        "peer_comparison": peer,
+        "mode": "repo",
+    }
+
+
+# ---------------------------------------------------------------------------
+# URL-mode runtime audit (no repo access — derives signals from live pages)
+# ---------------------------------------------------------------------------
+
+def _score_url_mode(pages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Heuristic architecture score derived purely from runtime page captures."""
