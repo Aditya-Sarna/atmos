@@ -472,3 +472,97 @@ async def auth_login(body: LocalAuthBody, request: Request, response: Response):
 @api.post("/auth/session")
 async def auth_session(body: SessionExchangeBody, request: Request, response: Response):
     data = await _exchange_session_id(body.session_id)
+    email = data["email"]
+    name = data.get("name") or email.split("@")[0]
+    picture = data.get("picture")
+    session_token = data["session_token"]
+
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        user_id = existing["user_id"]
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"name": name, "picture": picture}},
+        )
+    else:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        await db.users.insert_one(
+            {
+                "user_id": user_id,
+                "email": email,
+                "name": name,
+                "picture": picture,
+                "auth_provider": "emergent",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    return await _create_session_for_user(
+        request,
+        response,
+        user_id=user_id,
+        email=email,
+        name=name,
+        picture=picture,
+        session_token=session_token,
+    )
+
+
+@api.get("/auth/me")
+async def auth_me(user: User = Depends(current_user)):
+    org = await ensure_org_for_user(db, user.user_id, user.email, user.name)
+    member = await get_member(db, user.user_id)
+    org_id, perms = await get_user_permissions(db, user.user_id)
+    return {
+        "user_id": user.user_id,
+        "email": user.email,
+        "name": user.name,
+        "picture": user.picture,
+        "org_id": org_id,
+        "org_name": org.get("name") if org else None,
+        "role": member.get("role") if member else None,
+        "permissions": sorted(perms),
+    }
+
+
+@api.post("/auth/logout")
+async def auth_logout(request: Request, response: Response):
+    token = request.cookies.get("session_token")
+    if token:
+        await db.user_sessions.delete_one({"session_token": token})
+    response.delete_cookie("session_token", path="/")
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Project + Run endpoints
+# ----------------------------------------------------------------------------
+
+
+class ProjectCreate(BaseModel):
+    name: str
+    url: Optional[str] = None
+    github_url: Optional[str] = None
+    github_token: Optional[str] = None  # PAT, only used to (a) clone private repos and (b) open PRs
+
+
+class ProjectGithubTokenUpdate(BaseModel):
+    github_token: str
+
+
+def _classify_app_type(url: str, name: str) -> str:
+    text = f"{url} {name}".lower()
+    if any(k in text for k in ["stripe", "pay", "bank", "wallet", "finance", "invoice", "transaction"]):
+        return "finance"
+    if any(k in text for k in ["shop", "store", "checkout", "cart", "commerce", "amazon", "etsy"]):
+        return "e-commerce"
+    if any(k in text for k in ["calendar", "schedule", "event", "meeting", "booking"]):
+        return "calendar"
+    if any(k in text for k in ["dashboard", "analytics", "metric", "admin", "report"]):
+        return "dashboard"
+    return "generic"
+
+
+@api.post("/projects")
+async def create_project(body: ProjectCreate, user: User = Depends(current_user)):
+    gh_meta = parse_github_url(body.github_url) if body.github_url else None
