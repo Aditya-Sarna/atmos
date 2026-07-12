@@ -135,3 +135,80 @@ def _merge_cases(screen: dict[str, Any], brief: dict[str, Any]) -> list[dict[str
     for c in (brief.get("cases") or []):
         sel = _match_selector(screen, c.get("field", ""))
         if not sel:
+            continue
+        llm_cases.append({
+            "field": c.get("field") or "",
+            "selector": sel,
+            "name": c.get("name") or "Context case",
+            "value": str(c.get("value", "")),
+            "expectation": c.get("expectation", "accept_but_warn"),
+            "rationale": c.get("rationale", ""),
+            "source": "llm",
+        })
+    det = _deterministic_cases(screen)
+    merged: list[dict[str, Any]] = []
+    i = j = 0
+    while (i < len(llm_cases) or j < len(det)) and len(merged) < MAX_CASES_PER_SCREEN:
+        if i < len(llm_cases):
+            merged.append(llm_cases[i]); i += 1
+        if j < len(det) and len(merged) < MAX_CASES_PER_SCREEN:
+            merged.append(det[j]); j += 1
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Execution with video
+# ---------------------------------------------------------------------------
+
+
+async def _click_first_cta(page: Page, labels: list[str]) -> Optional[str]:
+    for label in labels:
+        try:
+            await page.get_by_role("button", name=label, exact=False).first.click(
+                timeout=1200, no_wait_after=True)
+            return label
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+async def _run_case_with_video(
+    browser: Browser,
+    screen: dict[str, Any],
+    case: dict[str, Any],
+    run_id: str,
+    vp: dict[str, Any],
+    on_progress=None,
+) -> dict[str, Any]:
+    case_id = f"st_{uuid.uuid4().hex[:8]}"
+    vp_label = vp["label"]
+    value = case.get("value", "")
+    value_disp = value if len(value) <= 60 else value[:60] + "…"
+    field = case.get("field", "input")
+    steps = [
+        f"Reach screen: {screen.get('name')}",
+        f"Focus field: {field}",
+        f"Enter: {value_disp or '(empty)'}",
+        "Submit & read validation",
+    ]
+
+    if on_progress:
+        await on_progress({"type": "test_case", "phase": "start", "id": case_id,
+                           "name": case.get("name"), "category": "Screen test",
+                           "steps": steps, "status": "running",
+                           "expected_result": case.get("expectation"),
+                           "explanation": case.get("rationale", "")})
+
+    ctx = await _new_context(browser, vp, record_video=True)
+    page = await ctx.new_page()
+    verdict = "warn"
+    outcome: dict[str, Any] = {}
+    screenshot_url: Optional[str] = None
+    video_url: Optional[str] = None
+    try:
+        await replay_path(page, screen.get("path", []))
+        if on_progress:
+            await on_progress({"type": "test_case_step", "case_id": case_id, "step_index": 1,
+                               "step": steps[1], "viewport": vp_label})
+        sel = case.get("selector")
+        filled = await _fill_field(page, sel, value) if sel else False
