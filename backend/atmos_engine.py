@@ -750,3 +750,90 @@ async def crawl_and_capture(browser: Browser, start_url: str, run_id: str, on_pr
             current_url = next((u for u in discovered_urls if u not in explored_urls), None)
             if not current_url:
                 break
+            explored_urls.add(current_url)
+            try:
+                await discovery_page.goto(current_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                await _settle(discovery_page)
+                # Give JS frameworks (React, Vue, etc.) extra time to render client-side routes.
+                await discovery_page.wait_for_timeout(600)
+                await _emit_frame(on_progress, discovery_page, f"Exploring — {current_url}")
+
+                # Flush any URLs captured by the framenavigated listener so far.
+                for u in list(nav_discovered):
+                    if u not in discovered_urls:
+                        discovered_urls.append(u)
+                nav_discovered.clear()
+
+                harvested = await _extract_links(discovery_page, current_url)
+                for u in harvested:
+                    if u not in discovered_urls:
+                        discovered_urls.append(u)
+
+                # Click safe controls one by one for THIS page, then return to THIS page.
+                buttons = await _enumerate_buttons(discovery_page)
+                for b in buttons[:MAX_CLICKS_PER_PAGE]:
+                    pre_url = _normalize(discovery_page.url)
+                    clicked = await _click_button_by_text(discovery_page, b)
+                    if not clicked:
+                        continue
+                    try:
+                        await discovery_page.wait_for_load_state("networkidle", timeout=2500)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    await discovery_page.wait_for_timeout(400)
+                    post_url = _normalize(discovery_page.url)
+                    await _emit_frame(on_progress, discovery_page, f"Clicked: {b['text']}")
+                    button_actions.append({
+                        "label": b["text"],
+                        "from": pre_url,
+                        "to": post_url,
+                        "navigated": pre_url != post_url,
+                    })
+                    if post_url != pre_url and _same_origin(start_url, post_url) and post_url not in discovered_urls:
+                        discovered_urls.append(post_url)
+
+                    # Flush nav listener hits (pushState navigations triggered by the click).
+                    for u in list(nav_discovered):
+                        if u not in discovered_urls:
+                            discovered_urls.append(u)
+                    nav_discovered.clear()
+
+                    new_links = await _extract_links(discovery_page, post_url)
+                    for u in new_links:
+                        if u not in discovered_urls and _same_origin(start_url, u):
+                            discovered_urls.append(u)
+
+                    # Return to the page currently being explored so later clicks are independent.
+                    if _normalize(discovery_page.url) != current_url:
+                        try:
+                            await discovery_page.goto(current_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                            await _settle(discovery_page)
+                            await discovery_page.wait_for_timeout(400)
+                        except Exception:  # noqa: BLE001
+                            break
+
+                    if len(discovered_urls) >= MAX_PAGES * 2:
+                        break
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Discovery failed for %s: %s", current_url, exc)
+    finally:
+        await discovery_page.close()
+        await discovery_ctx.close()
+
+    # Cap to MAX_PAGES; keep order with start URL first.
+    target_urls = discovered_urls[:MAX_PAGES]
+
+    # ── 2) Capture every target page at every viewport ─────────────────
+    contexts = []
+    for vp in VIEWPORTS:
+        contexts.append((vp, await _new_context(browser, vp)))
+
+    seen: set[str] = set()
+    pages: list[dict[str, Any]] = []
+    try:
+        for idx, url in enumerate(target_urls):
+            if url in seen:
+                continue
+            seen.add(url)
+            page_slug = f"page{idx:02d}"
+            page_entry: dict[str, Any] = {
