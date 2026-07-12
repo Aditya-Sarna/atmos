@@ -245,3 +245,89 @@ export default function Report() {
                 <div key={`${p.url}-${i}`} className="card-elev p-4 md:p-5" data-testid={`page-summary-${i}`}>
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
+                      <div className="font-medium truncate">{p.title || p.url}</div>
+                      <div className="text-xs text-[#86868B] font-mono truncate mt-1">{p.url}</div>
+                    </div>
+                  </div>
+                  <div className="mt-3 text-sm text-[#1D1D1F]/85 leading-relaxed">
+                    {p.summary || "No page-specific summary was returned for this screen."}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ISSUES with before/after + alternatives */}
+        <div className="mt-10 space-y-4" data-testid="report-issues">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Issues · executed fixes · alternatives</div>
+              <h2 className="font-display text-2xl md:text-3xl tracking-tight font-medium">Atmos found {(s.issues || []).length} issues and shipped a fix for each.</h2>
+            </div>
+          </div>
+          <div className="grid gap-4">
+            {(s.issues || []).map((i) => (
+              <IssueDiffCard key={i.id} issue={i} runId={runId} />
+            ))}
+          </div>
+        </div>
+
+        {/* ARCHITECTURE — only for GitHub-connected projects */}
+        {s.architecture && (
+          <ArchitectureSection arch={s.architecture} runId={runId} />
+        )}
+
+        {/* FUZZ TEST RESULTS */}
+        {Array.isArray(s.fuzz_cases) && s.fuzz_cases.length > 0 && (
+          <FuzzReportSection cases={s.fuzz_cases} />
+        )}
+
+        {/* TEST CASES with live recording playback */}
+        {Array.isArray(s.test_cases) && s.test_cases.length > 0 && (
+          <div className="mt-10" data-testid="report-test-cases">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Test cases · recorded</div>
+            <h2 className="font-display text-2xl md:text-3xl tracking-tight font-medium mb-5">
+              Every case Atmos performed on your UI.
+            </h2>
+            <ReportTestCases cases={s.test_cases} />
+          </div>
+        )}
+
+        {/* Accessibility audit */}
+        {s.accessibility_audit?.summary && (
+          <div className="mt-10 card-elev p-6" data-testid="report-a11y">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Accessibility audit</div>
+            <h2 className="font-display text-2xl tracking-tight font-medium mb-3">Measured checks, not theater</h2>
+            <p className="text-sm leading-relaxed mb-4">{s.accessibility_audit.summary}</p>
+            <div className="grid sm:grid-cols-2 gap-3">
+              {(s.accessibility_audit.findings || []).slice(0, 8).map((f, i) => (
+                <div key={i} className="rounded-xl border border-black/5 bg-[#F5F5F7] p-3 text-sm">
+                  <div className="font-medium">{f.title}</div>
+                  <div className="text-[#86868B] mt-1 text-xs">{f.cause}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Funnel */}
+        {s.funnel?.comparison && (
+          <div className="mt-10 card-elev p-6" data-testid="report-funnel">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Conversion funnel</div>
+            <h2 className="font-display text-2xl tracking-tight font-medium mb-3">Path to goal</h2>
+            <p className="text-sm">{s.funnel.comparison}</p>
+            <div className="mt-3 flex gap-6 text-sm">
+              <div><span className="text-[#86868B]">Your clicks</span> <span className="font-display text-xl ml-2">{s.funnel.your_clicks ?? "—"}</span></div>
+              <div><span className="text-[#86868B]">Industry avg</span> <span className="font-display text-xl ml-2">{s.funnel.industry_avg ?? "—"}</span></div>
+            </div>
+            {s.funnel.video_url && (
+              <video className="mt-4 w-full rounded-xl border border-black/5" src={s.funnel.video_url} controls playsInline />
+            )}
+          </div>
+        )}
+
+        {/* Design theory */}
+        {s.design_theory?.score != null && (
+          <div className="mt-10 card-elev p-6" data-testid="report-design">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2">Design theory</div>
