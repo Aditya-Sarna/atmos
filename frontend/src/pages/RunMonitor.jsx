@@ -1187,3 +1187,102 @@ export default function RunMonitor() {
           {issues.length > 0 && (
             <div className="card-elev p-5" data-testid="issues-snapshot">
               <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Issues ({issues.length})</div>
+              <div className="space-y-3">
+                {issues.slice(-5).map((i) => (
+                  <div key={i.seq} className="flex gap-3">
+                    <span className="mt-1 w-1.5 h-1.5 rounded-full shrink-0" style={{ background: SEV_COLOR[i.severity] || "#86868B" }} />
+                    <div className="text-sm">
+                      <div className="font-medium leading-snug">{i.title}</div>
+                      <div className="font-mono text-[11px] text-[#86868B] mt-0.5">{i.file}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Benchmarks — real click paths vs competitors */}
+          {benchmarks.length > 0 && (
+            <div className="card-elev p-5" data-testid="benchmarks-card">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Benchmark (real paths)</div>
+              <div className="space-y-3">
+                {benchmarks.map((b) => (
+                  <div key={b.seq} className="flex items-center justify-between text-sm">
+                    <div>{b.competitor}</div>
+                    <div className="font-mono text-xs">
+                      <span className={b.verdict === "behind" ? "text-[#FF3B30]" : b.verdict === "ahead" ? "text-[#34C759]" : "text-[#1D1D1F]"}>{b.your_clicks}</span>
+                      <span className="text-[#86868B]"> vs </span>
+                      <span className="text-[#34C759]">{b.clicks_to_primary}</span>
+                      <span className="text-[#86868B]"> clicks</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </aside>
+      </main>
+    </div>
+  );
+}
+
+// ---------------- Fuzz case list ----------------
+function FuzzCaseList({ cases }) {
+  const [expandedScreenshot, setExpandedScreenshot] = useState(null);
+
+  // Group by field_archetype, then by field label
+  // Backend sends: field_archetype, field (label), value_sent, expected_result, explanation, screenshot_url
+  const groups = useMemo(() => {
+    const byArche = new Map();
+    for (const c of cases) {
+      const a = c.field_archetype || "field";
+      if (!byArche.has(a)) byArche.set(a, new Map());
+      const byField = byArche.get(a);
+      // field name: backend emits 'field', older versions used 'field_label' or 'field_name'
+      const f = c.field || c.field_label || c.field_name || "(unknown)";
+      if (!byField.has(f)) byField.set(f, []);
+      byField.get(f).push(c);
+    }
+    return Array.from(byArche.entries()).map(([arche, m]) => ({
+      arche,
+      fields: Array.from(m.entries()).map(([field, items]) => ({ field, items })),
+    }));
+  }, [cases]);
+
+  const counts = useMemo(() => {
+    let pass = 0, fail = 0, warn = 0, pending = 0;
+    for (const c of cases) {
+      if (c.status === "pass") pass++;
+      else if (c.status === "fail") fail++;
+      else if (c.status === "warn") warn++;
+      else pending++;
+    }
+    return { pass, fail, warn, pending };
+  }, [cases]);
+
+  const statusColor = { pass: "#34C759", fail: "#FF3B30", warn: "#FF9500", pending: "#86868B" };
+  const BACKEND_URL_LOCAL = process.env.REACT_APP_BACKEND_URL || "http://localhost:8001";
+
+  return (
+    <>
+      {expandedScreenshot && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+          onClick={() => setExpandedScreenshot(null)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => e.key === "Escape" && setExpandedScreenshot(null)}
+        >
+          <img
+            src={`${BACKEND_URL_LOCAL}${expandedScreenshot}`}
+            alt="Fuzz screenshot"
+            className="max-h-[90vh] max-w-[90vw] rounded-xl shadow-2xl"
+          />
+        </div>
+      )}
+      <div className="card-elev p-4 flex flex-wrap gap-2 text-xs" data-testid="fuzz-summary">
+        <span className="rounded-full bg-[#34C759]/10 text-[#1E8E3E] px-3 py-1">Passed {counts.pass}</span>
+        <span className="rounded-full bg-[#FF3B30]/10 text-[#FF3B30] px-3 py-1">Failed {counts.fail}</span>
+        <span className="rounded-full bg-[#FF9500]/10 text-[#B25E00] px-3 py-1">Warn {counts.warn}</span>
+        {counts.pending > 0 && (
+          <span className="rounded-full bg-[#F5F5F7] text-[#86868B] px-3 py-1">Running {counts.pending}</span>
