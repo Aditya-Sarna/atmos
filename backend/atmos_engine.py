@@ -1185,3 +1185,90 @@ async def apply_patch_full_page(
             ) or url_path
             patch_bytes = _screenshot_bytes(SCREENSHOTS_DIR / Path(url_path).name)
         elif baseline_bytes is not None and patch_bytes == baseline_bytes:
+            no_op_reason = "patch produced no visible change"
+            url_path = await _capture(
+                f"{slug}_diag", emphasize=True,
+                force_banner="Atmos diagnostic: CSS applied but produced no visible difference at this viewport.",
+            ) or url_path
+            patch_bytes = _screenshot_bytes(SCREENSHOTS_DIR / Path(url_path).name)
+
+        diff_url: Optional[str] = None
+        changed_pct: Optional[float] = None
+        if baseline_path and baseline_path.exists():
+            diff_name = f"{run_id}_{_safe_name(slug)}_{_safe_name(vp_label)}_diff.png"
+            diff_path = SCREENSHOTS_DIR / diff_name
+            diff_info = _write_pixel_diff(baseline_path, SCREENSHOTS_DIR / Path(url_path).name, diff_path)
+            if diff_info:
+                diff_url = f"/api/screens/{diff_name}"
+                changed_pct = diff_info["changed_pct"]
+
+        return {
+            "ok": True,
+            "after_url": url_path,
+            "diff_url": diff_url,
+            "changed_pct": changed_pct,
+            "applied": selectors_matched and (no_op_reason is None),
+            "no_op_reason": no_op_reason,
+        }
+    finally:
+        try:
+            await ctx.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ---------------------------------------------------------------------------
+# LLM
+# ---------------------------------------------------------------------------
+
+
+def _parse_llm_json(text: str) -> dict[str, Any]:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+    if not text.startswith("{"):
+        m = re.search(r"\{[\s\S]*\}\s*$", text)
+        if m:
+            text = m.group(0)
+    return json.loads(text)
+
+
+async def llm_analyze_app(project: dict[str, Any], command: str, pages: list[dict[str, Any]], db=None) -> dict[str, Any]:
+    """Holistic multi-page analysis via the user's IDE LLM (vision when available)."""
+    from user_llm_proxy import user_llm_json
+
+    chosen = []
+    for p in pages:
+        cap = p.get("captures", {}).get("Desktop 1440") or next(
+            (c for c in p.get("captures", {}).values() if c.get("ok")), None
+        )
+        if cap and cap.get("ok"):
+            vp = "Desktop 1440" if p.get("captures", {}).get("Desktop 1440", {}).get("ok") else next(
+                k for k, v in p.get("captures", {}).items() if v.get("ok")
+            )
+            chosen.append((p, vp, cap))
+    chosen = chosen[:5]
+    if not chosen:
+        raise RuntimeError("No usable page captures to analyze.")
+
+    images: list[str] = []
+    page_lines: list[str] = []
+    for p, vp_label, cap in chosen:
+        path = SCREENSHOTS_DIR / Path(cap["url_path"]).name
+        if not path.exists():
+            continue
+        images.append(base64.b64encode(path.read_bytes()).decode("ascii"))
+        page_lines.append(f"- {p['url']}  (viewport {vp_label}, title: {p.get('title') or '—'})")
+
+    prompt = (
+        f"Target product: {project['name']}\n"
+        f"Start URL: {project['url']}\n"
+        f"Detected archetype: {project.get('app_type')}\n"
+        f"Command: {command}\n\n"
+        "Pages provided as screenshots (in the order they were attached):\n"
+        + "\n".join(page_lines)
+        + "\n\nReturn the issues in JSON exactly per this schema. Make sure every issue's page_url "
+          "matches one of the URLs above exactly.\n\n"
+        + ISSUE_SCHEMA
