@@ -773,3 +773,51 @@ async def explore_app_flow(
         try:
             # Don't reset state — keep VLM-discovered screens and ADD to them.
             if not hub_path:
+                hub_path = [dict(s) for s in path] if path else [{"op": "goto", "url": base_url}]
+
+            # ── Phase B: single-page reuse fan-out ──────────────────────────────
+            def _branch_score(b: dict[str, Any]) -> int:
+                t = (b.get("text") or "").strip().lower()
+                if t in NAV_TARGETS:                 return 3
+                if any(k in t for k in NAV_TARGETS): return 2
+                if b.get("isIcon"):                  return 1
+                return 0
+
+            def _candidate_buttons(btns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                cands = [
+                    b for b in btns
+                    if _branch_score(b) > 0
+                    and (b.get("text") or "").strip().lower() not in FORWARD_CTAS
+                    and not (b.get("text") or "").strip().isdigit()
+                ]
+                cands.sort(key=_branch_score, reverse=True)
+                return cands[:MAX_HUB_BRANCHES]
+
+            frontier: list[list[dict[str, Any]]] = [hub_path]
+
+            while frontier and len(screens) < MAX_SCREENS:
+                if _timed_out():
+                    break
+                current_path = frontier.pop(0)
+                hub_page = await ctx.new_page()
+                try:
+                    await replay_path(hub_page, current_path)
+                    hub_url = hub_page.url
+                    candidates = _candidate_buttons(await _enumerate_buttons(hub_page))
+
+                    for b in candidates:
+                        if _timed_out() or len(screens) >= MAX_SCREENS:
+                            break
+                        before_url = hub_page.url
+                        try:
+                            ok = await _click_button_by_text(hub_page, b)
+                            if not ok:
+                                continue
+                            await _settle(hub_page)
+                            await hub_page.wait_for_timeout(SETTLE_MS)
+
+                            new_sig = await _signature(hub_page)
+                            if new_sig not in by_sig:
+                                new_path = current_path + [{"op":"click","text":b.get("text",""),
+                                                            "rect":b.get("rect"),"role":b.get("type")}]
+                                registered = await _register(hub_page, new_path)
