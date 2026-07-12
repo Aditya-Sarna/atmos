@@ -158,3 +158,83 @@ async def _call_openai_compatible(
         url = f"{base}/v1/chat/completions"
         user_content: Any
         if images_b64:
+            parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            for b64 in images_b64[:3]:
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                })
+            user_content = parts
+        else:
+            user_content = prompt
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.2,
+        }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(url, headers=headers, json=body)
+        r.raise_for_status()
+        data = r.json()
+
+    if config.get("provider") == "anthropic":
+        parts = data.get("content") or []
+        return "".join(p.get("text", "") for p in parts if p.get("type") == "text")
+
+    choices = data.get("choices") or []
+    if choices:
+        return choices[0].get("message", {}).get("content") or ""
+    return ""
+
+
+async def _call_emergent_text(
+    prompt: str,
+    system: str,
+    session_id: str,
+    images_b64: Optional[list[str]] = None,
+) -> str:
+    api_key = os.environ.get("EMERGENT_LLM_KEY", "")
+    if not api_key:
+        return "{}" if images_b64 is None else "{}"
+    try:
+        from emergentintegrations.llm.chat import (  # type: ignore
+            LlmChat, UserMessage, ImageContent, TextDelta, StreamDone,
+        )
+    except Exception:  # noqa: BLE001
+        return "{}"
+
+    chat = LlmChat(api_key=api_key, session_id=session_id, system_message=system).with_model(
+        "anthropic", "claude-sonnet-4-5-20250929"
+    )
+    files = [ImageContent(image_base64=b) for b in (images_b64 or [])[:5]]
+    text = ""
+    msg = UserMessage(text=prompt, file_contents=files) if files else UserMessage(text=prompt)
+    async for ev in chat.stream_message(msg):
+        if isinstance(ev, TextDelta):
+            text += ev.content
+        elif isinstance(ev, StreamDone):
+            break
+    return text.strip()
+
+
+def _parse_json(text: str) -> dict[str, Any]:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Try to extract outermost object
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                pass
+        return {"raw": text}
