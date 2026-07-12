@@ -1694,3 +1694,97 @@ async def _execute_run(
                     await _emit(run_id, seq, "phase", {"phase": "dopamine", "label": "Engagement & Dark Patterns"})
                     engagement_max = bool(enable_dopamine_max or project.get("enable_dopamine_max"))
 
+                    async def dopamine_progress(ev: dict[str, Any]) -> None:
+                        if ev.get("type") == "dopamine_analysis":
+                            await _emit(run_id, seq, "dopamine_analysis", ev)
+
+                    dopamine_result = await analyze_dopamine_engagement(
+                        browser, target_url, app_type,
+                        enabled=True,
+                        engagement_max=engagement_max,
+                        on_progress=dopamine_progress,
+                    )
+                    dp_n = len(dopamine_result.get("dark_patterns") or [])
+                    sug_n = len(dopamine_result.get("suggestions") or [])
+                    miss_n = len(dopamine_result.get("dark_pattern_suggestions") or [])
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": (
+                            f"Engagement/dark-patterns: score {dopamine_result.get('dark_pattern_score')}/100 · "
+                            f"{dp_n} present · {miss_n} missing suggestions (disclaimer) · {sug_n} ethical tip(s)"
+                            + (" · max mode on" if engagement_max else "")
+                        )})
+                    for di in (dopamine_result.get("dark_pattern_issues") or [])[:8]:
+                        issue = {
+                            "id": di.get("id") or f"dp_{uuid.uuid4().hex[:8]}",
+                            "category": "Dark pattern",
+                            "severity": di.get("severity", "medium"),
+                            "title": di.get("title") or "Dark pattern",
+                            "cause": di.get("cause") or "",
+                            "page_url": target_url,
+                            "file": urlparse(target_url).path or "/",
+                            "patch_css": "",
+                            "patch_explanation": di.get("recommendation") or "Remove deceptive design.",
+                            "alternatives": [],
+                            "summary": di.get("recommendation") or "",
+                        }
+                        aggregated_issues.append(issue)
+                        await _emit(run_id, seq, "issue", issue)
+
+                # ── Marketing copywriting alternatives ─────────────────
+                copywriting_result: dict[str, Any] = {}
+                if profile["includes"]("copywriting"):
+                    await _emit(run_id, seq, "phase", {"phase": "copywriting", "label": "Marketing Copy Alternatives"})
+
+                    async def copy_progress(ev: dict[str, Any]) -> None:
+                        if ev.get("type") == "copy_suggestion":
+                            await _emit(run_id, seq, "copy_suggestion", ev)
+                        elif ev.get("type") == "copywriting_report":
+                            await _emit(run_id, seq, "copywriting_report", ev)
+
+                    copywriting_result = await analyze_copywriting(
+                        browser, target_url, project, run_id,
+                        db=db,
+                        user_id=project.get("user_id"),
+                        on_progress=copy_progress,
+                    )
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": copywriting_result.get("summary", f"Copy: {copywriting_result.get('blocks_analyzed', 0)} blocks")})
+
+                # ── Demand intelligence (Reddit / GitHub / Google reviews) ─
+                demand_result: dict[str, Any] = {}
+                if profile["includes"]("demand"):
+                    await _emit(run_id, seq, "phase", {"phase": "demand", "label": "Feature Demand Intelligence"})
+
+                    async def demand_progress(ev: dict[str, Any]) -> None:
+                        if ev.get("type") == "demand_log":
+                            await _emit(run_id, seq, "log", {"level": "info", "message": ev.get("message", "")})
+                        elif ev.get("type") == "demand_plan":
+                            await _emit(run_id, seq, "log", {"level": "info", "message": ev.get("message", "Research plan ready")})
+                            await _emit(run_id, seq, "demand_plan", {
+                                "plan": ev.get("plan"),
+                                "message": ev.get("message"),
+                            })
+                        elif ev.get("type") == "demand_report":
+                            await _emit(run_id, seq, "demand_report", ev)
+
+                    demand_result = await build_demand_report(
+                        project,
+                        pages=pages,
+                        button_actions=button_actions,
+                        page_summaries=page_summaries,
+                        on_progress=demand_progress,
+                        db=db,
+                        user_id=project.get("user_id"),
+                        run_id=run_id,
+                    )
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": demand_result.get("executive_summary", "Demand report ready")})
+
+                await _emit(run_id, seq, "phase", {"phase": "report", "label": "Executive Report"})
+                report = await _llm_report(project, command, focus_areas, emitted_issues)
+
+                ax_count = sum(1 for i in emitted_issues if i["category"] == "Accessibility")
+                ux_count = sum(1 for i in emitted_issues if i["category"] == "UX")
+                rel_count = sum(1 for i in emitted_issues if i["category"] == "Functional")
+                a11y_score = int(a11y_result.get("score") or 0)
+                summary = {
