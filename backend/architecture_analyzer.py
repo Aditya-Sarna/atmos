@@ -636,3 +636,40 @@ def _score_url_mode(pages: list[dict[str, Any]]) -> dict[str, Any]:
             "discoverability": discoverability,
             "completeness": completeness,
             "speed_hint": speed_hint,
+            "complexity": complexity,
+        },
+    }
+
+
+def _deterministic_url_suggestions(pages: list[dict[str, Any]], app_type: str) -> list[dict[str, Any]]:
+    """Always-on architecture findings for URL-mode runs.
+
+    These don't depend on the LLM — they fire from concrete signals visible
+    in the crawl (missing alt text, forms without labels, etc.).
+    """
+    out: list[dict[str, Any]] = []
+
+    # 1. Coverage / route map
+    routes = sorted({p.get("route") or p.get("url") for p in pages})
+    out.append({
+        "id": f"url_coverage_{uuid.uuid4().hex[:6]}",
+        "title": "Discoverable surface",
+        "severity": "info",
+        "category": "Coverage",
+        "rationale": f"Atmos reached {len(routes)} distinct route(s): {', '.join(routes[:6]) + ('…' if len(routes) > 6 else '')}.",
+        "patch_kind": "manual",
+    })
+
+    # 2. Missing form labels (common a11y / arch smell)
+    unlabeled = []
+    for p in pages:
+        for inp in (p.get("inputs") or []):
+            label = (inp.get("label") or "").strip()
+            if not label and inp.get("type") not in {"hidden", "submit", "button"}:
+                unlabeled.append({"page": p.get("route") or p.get("url"), "name": inp.get("name") or inp.get("placeholder") or "(unnamed)"})
+    if unlabeled:
+        sample = "; ".join(f"{u['page']}::{u['name']}" for u in unlabeled[:4])
+        out.append({
+            "id": f"url_a11y_{uuid.uuid4().hex[:6]}",
+            "title": f"{len(unlabeled)} form input(s) lack accessible labels",
+            "severity": "medium",
