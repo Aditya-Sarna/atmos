@@ -712,3 +712,105 @@ Return JSON:
 Write 3-5 proposed_features. Extremely detailed briefs a PM could hand to eng.
 Stay inside {category}. Do not pad with unrelated vertical content.
 """
+
+    if db and user_id:
+        try:
+            from user_llm_proxy import user_llm_json
+            result = await user_llm_json(
+                db, user_id, prompt,
+                system=SYNTHESIS_SYSTEM,
+                session_id="demand-synth",
+            )
+            if isinstance(result, dict) and result.get("executive_summary"):
+                result["synthesizer"] = "llm"
+                return result
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("synthesis LLM failed: %s", exc)
+
+    return _heuristic_synthesis(name, plan, themes, evidence)
+
+
+def _heuristic_synthesis(
+    name: str,
+    plan: dict[str, Any],
+    themes: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Research-shaped markdown from evidence — category from plan, not a hard-coded vertical essay."""
+    category = plan.get("category") or plan.get("vertical") or "this category"
+    competitors = plan.get("competitors") or []
+    terms = plan.get("context_terms") or []
+    total_w = sum(int(e.get("weight") or 1) for e in evidence) or 1
+    by_source = Counter(e.get("source") for e in evidence)
+    top = themes[:6]
+    s_count = sum(1 for t in themes if t["tier"] == "S")
+    a_count = sum(1 for t in themes if t["tier"] == "A")
+
+    # Archetypes from source mix + theme language (category-agnostic)
+    reddit_w = sum(int(e.get("weight") or 1) for e in evidence if "reddit" in str(e.get("source")))
+    github_w = sum(int(e.get("weight") or 1) for e in evidence if e.get("source") == "github")
+    review_w = sum(int(e.get("weight") or 1) for e in evidence if e.get("source") in {"play_store", "google_reviews"})
+    power = round(100 * github_w / total_w)
+    community = round(100 * reddit_w / total_w)
+    end_users = round(100 * review_w / total_w)
+    other = max(0, 100 - power - community - end_users)
+
+    quotes = [e for e in sorted(evidence, key=lambda x: -int(x.get("weight") or 1)) if e.get("snippet")][:8]
+
+    exec_sum = (
+        f"{plan.get('domain_framing', '')} "
+        f"Across {len(evidence)} weighted signals "
+        f"(Reddit {by_source.get('reddit', 0) + by_source.get('reddit_comment', 0)}, "
+        f"GitHub {by_source.get('github', 0)}, "
+        f"Play/Google {by_source.get('play_store', 0) + by_source.get('google_reviews', 0)}), "
+        f"{name} in {category} shows {s_count} S-tier and {a_count} A-tier themes. "
+        f"Top pressure: {', '.join(t['label'] for t in top[:3]) or 'thin live signal'}. "
+        f"Context terms from the product crawl ({', '.join(terms[:5]) or 'n/a'}) shaped the keyword plan."
+    )
+
+    archetypes_md = f"""## User / operator archetypes (among observed signals)
+
+Signals for {category} split less by preference than by where people complain and request:
+
+| Archetype | Approx. share | Where they show up | What they optimize for |
+|-----------|---------------|--------------------|------------------------|
+| Power / technical operators | ~{power}% | GitHub issues | Depth, APIs, edge cases |
+| Community validators | ~{community}% | Reddit threads | Peer comparison, workarounds |
+| End-user reviewers | ~{end_users}% | Play / review snippets | Reliability, clarity, pricing |
+| Mixed / unclassified | ~{other}% | Cross-source | — |
+
+Implication for {name}: ship surfaces that satisfy review-driven clarity *and* issue-tracker depth — peers like {', '.join(competitors[:3]) or 'category leaders'} set the expectation bar.
+"""
+
+    workflows_md = f"""## How people begin — and how the idea mutates ({category})
+
+### Pre-building / pre-buying
+Conviction and peer products often substitute for formal research. Planned questions:
+{chr(10).join('- ' + q for q in (plan.get('research_questions') or [])[:5])}
+
+### During evaluation / building
+Architecture and category constraints frequently decide UX before a dedicated designer is involved. Shipped peers ({', '.join(competitors[:4]) or 'category leaders'}) operate as the de-facto design system.
+
+### Validation
+Common loop: build or configure privately → post to Reddit / Discord / reviews → iterate on comments. Feedback skews toward the literate cohort on Reddit/GitHub; Play reviews re-balance toward mainstream friction.
+
+### Critical paths for {name}
+Crawl-weighted terms to prioritize in journeys: {', '.join(terms[:6]) or 'onboarding, core CTA, settings'}.
+"""
+
+    resources_md = f"""## Resources & format gaps ({category})
+
+Resources often exist; the format fails. Narrative help centers and long docs are hard to enforce in support macros or AI-assisted workflows — teams need decision rules, checklists, and explicit anti-patterns.
+
+### Evidence samples
+{chr(10).join(f'> {q["snippet"]}' + (f' — {q.get("source")}' if q.get("source") else '') for q in quotes[:5])}
+"""
+
+    pains = top[:6] or [{"label": "Thin live scrape", "examples": [], "demand_score": 0, "sources": {}}]
+    pain_lines = []
+    for i, t in enumerate(pains, 1):
+        ex = (t.get("examples") or [{}])[0].get("snippet") or "No quote captured"
+        pain_lines.append(
+            f"{i}. **{t['label']}** (weight {t.get('demand_score')}, sources {t.get('sources')})\n"
+            f"   - Signal: “{ex}”\n"
+            f"   - Implication for {name}: treat as a category gap in {category}, not a one-off complaint."
