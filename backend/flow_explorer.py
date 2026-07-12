@@ -725,3 +725,51 @@ async def explore_app_flow(
 
             actions = decision.get("actions") or []
             if not isinstance(actions, list) or not actions:
+                break
+            actions = actions[:VLM_MAX_ACTIONS_PER_STEP]
+
+            before_sig = await _signature(page)
+            before_url = page.url
+            progressed = False
+            on_pin = bool(context.get("has_keypad")) or _is_pin_context(context)
+
+            for act in actions:
+                ok, step_taken = await _execute_vlm_action(page, act, elements)
+                if ok and step_taken:
+                    path.append(step_taken)
+                    vlm_success_actions += 1
+                    await _settle(page)
+                    await page.wait_for_timeout(SETTLE_MS)
+                    after_sig = await _signature(page)
+                    if after_sig != before_sig or page.url != before_url:
+                        progressed = True
+                        break
+                else:
+                    fail_key = str(act.get("element_id") or act.get("selector") or act.get("text") or act.get("action"))
+                    failed_targets.append(fail_key)
+
+            if progressed:
+                vlm_stagnation = 0
+            elif on_pin:
+                # On a PIN screen, individual digit taps DO NOT change the
+                # signature — only the final digit does. Don't penalize.
+                vlm_stagnation = max(0, vlm_stagnation - 1)
+            else:
+                vlm_stagnation += 1
+                if vlm_stagnation >= VLM_STAGNATION_LIMIT:
+                    logger.info("VLM crawl stagnated after %d rounds", vlm_stagnation)
+                    break
+
+    except Exception as exc:
+        logger.warning("Gemini Visual VLM crawler loop encountered issue: %s", exc)
+
+    # ── Phase B+: ALWAYS run BFS fan-out as augmentation ───────────────
+    # Previous behaviour was "fall back to BFS only when VLM produced 0 screens".
+    # That left vast portions of multi-page apps undiscovered. Now we run the
+    # deterministic BFS *in addition to* the VLM, picking up any pages the
+    # VLM didn't reach.
+    if len(screens) < MAX_SCREENS:
+        logger.info("Augmenting with BFS fan-out (current screens: %d)", len(screens))
+        try:
+            # Don't reset state — keep VLM-discovered screens and ADD to them.
+            if not hub_path:
