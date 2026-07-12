@@ -989,3 +989,102 @@ export default function RunMonitor() {
                 return (
                   <div
                     key={ph}
+                    className={`flex items-center gap-3 rounded-lg px-3 py-2 ${reached ? "bg-[#F5F5F7]" : ""}`}
+                    data-testid={`phase-row-${ph}`}
+                  >
+                    <Icon className={`h-4 w-4 ${reached ? "text-[#0071E3]" : "text-[#A1A1A6]"}`} strokeWidth={1.5} />
+                    <span className={`text-sm capitalize ${reached ? "text-[#1D1D1F]" : "text-[#A1A1A6]"}`}>
+                      {ph}
+                    </span>
+                    {reached && <span className="ml-auto text-[10px] text-[#34C759]">●</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Focus areas */}
+          {focusAreas.length > 0 && (
+            <div className="card-elev p-5" data-testid="focus-areas-card">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Focus areas</div>
+              <div className="flex flex-wrap gap-2">
+                {focusAreas.map((f, i) => (
+                  <span key={i} className="text-xs rounded-full bg-[#F5F5F7] px-3 py-1.5 text-[#1D1D1F]/80">{f}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Viewports */}
+          {viewports.length > 0 && (
+            <div className="card-elev p-5" data-testid="viewports-card">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Responsive sweep</div>
+              <div className="space-y-2">
+                {viewports.map((v) => (
+                  <div key={v.seq} className="flex items-center justify-between text-sm">
+                    <span>{v.viewport}</span>
+                    <span className="font-mono text-xs text-[#86868B]">{v.w}×{v.h}</span>
+                    <span className={`text-xs ${v.status === "warn" ? "text-[#FF9500]" : "text-[#34C759]"}`}>{v.status}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Personas — academic rules + annotated video */}
+          {personas.length > 0 && (
+            <div className="card-elev p-5" data-testid="personas-card">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Persona simulation (research-backed)</div>
+              <div className="space-y-4">
+                {personas.map((p) => (
+                  <div key={p.seq || p.id} className="border-b border-black/5 pb-3 last:border-0 last:pb-0">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-sm font-medium">{p.label}</div>
+                        <div className="text-[11px] text-[#86868B]">{p.focus}</div>
+                        {p.rules_passed != null && (
+                          <div className="text-[11px] text-[#86868B] mt-0.5">{p.rules_passed}/{p.rules_total} rules passed</div>
+                        )}
+                      </div>
+                      <div className="font-display tabular-nums text-base">
+                        <span style={{ color: p.score >= 80 ? "#34C759" : p.score >= 65 ? "#FF9500" : "#FF3B30" }}>
+                          {p.score}
+                        </span>
+                        <span className="text-[#A1A1A6] text-xs ml-0.5">/100</span>
+                      </div>
+                    </div>
+                    {p.video_url && (
+                      <video src={`${process.env.REACT_APP_BACKEND_URL}${p.video_url}`} controls className="w-full rounded-lg mt-2 bg-black/5" data-testid={`persona-video-${p.id}`} />
+                    )}
+                    {(p.annotations || personaAnnotations.filter((a) => a.persona_id === p.id)).slice(0, 3).map((ann, i) => (
+                      <div key={i} className="mt-2 text-xs p-2 rounded-lg bg-[#FFF8E6] border border-[#FF9500]/20 text-[#1D1D1F]/80">
+                        {ann.message}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Conversion funnel video */}
+          {funnelAnalysis && (
+            <div className="card-elev p-5" data-testid="funnel-card">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-2">Conversion funnel</div>
+              <div className="font-display text-2xl font-medium tabular-nums">
+                <span className={funnelAnalysis.verdict === "behind" ? "text-[#FF3B30]" : funnelAnalysis.verdict === "ahead" ? "text-[#34C759]" : ""}>
+                  {funnelAnalysis.your_clicks}
+                </span>
+                <span className="text-[#86868B] text-base font-normal"> clicks vs industry {funnelAnalysis.industry_avg}</span>
+              </div>
+              <p className="text-sm text-[#86868B] mt-1">{funnelAnalysis.comparison}</p>
+              {funnelAnalysis.video_url && (
+                <video src={`${process.env.REACT_APP_BACKEND_URL}${funnelAnalysis.video_url}`} controls className="w-full rounded-lg mt-3 bg-black/5" data-testid="funnel-video" />
+              )}
+            </div>
+          )}
+
+          {/* Competitive side-by-side */}
+          {competitiveDiffs.length > 0 && (
+            <div className="card-elev p-5" data-testid="competitive-diff-card">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Competitive UX diff</div>
