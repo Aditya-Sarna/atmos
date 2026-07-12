@@ -1976,3 +1976,97 @@ async def _resolve_chaos_pages(project: dict[str, Any], body_pages: Optional[lis
     # Prefer IDE-saved targets
     saved = await db.chaos_targets.find_one({"project_id": project["project_id"]}, {"_id": 0})
     if scope == "pages" and saved and saved.get("pages"):
+        return list(saved["pages"])
+    if saved and saved.get("scope") == "pages" and saved.get("pages") and not body_pages:
+        return list(saved["pages"])
+    # Fall back to last run app_graph
+    last = await db.test_runs.find_one(
+        {"project_id": project["project_id"], "status": "completed"},
+        {"_id": 0, "summary.app_graph": 1},
+        sort=[("completed_at", -1)],
+    )
+    graph_pages = []
+    if last:
+        for p in (last.get("summary") or {}).get("app_graph") or []:
+            if p.get("url"):
+                graph_pages.append(p["url"])
+    if scope == "app":
+        return graph_pages[:12] or [project.get("url") or "/"]
+    return body_pages or graph_pages[:8] or [project.get("url") or "/"]
+
+
+@api.put("/projects/{project_id}/chaos/targets")
+async def set_chaos_targets(project_id: str, body: ChaosTargetsBody, user: User = Depends(current_user)):
+    """IDE / UI: select entire app or specific pages for Chaos Lab."""
+    await require_project_for_user(db, project_id, user.user_id, permission="runs:start")
+    doc = {
+        "project_id": project_id,
+        "user_id": user.user_id,
+        "scope": body.scope if body.scope in {"app", "pages"} else "pages",
+        "pages": body.pages or [],
+        "include_payments": body.include_payments,
+        "source": body.source,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.chaos_targets.update_one({"project_id": project_id}, {"$set": doc}, upsert=True)
+    return doc
+
+
+@api.get("/projects/{project_id}/chaos/targets")
+async def get_chaos_targets(project_id: str, user: User = Depends(current_user)):
+    await require_project_for_user(db, project_id, user.user_id, permission="runs:read")
+    doc = await db.chaos_targets.find_one({"project_id": project_id}, {"_id": 0})
+    return doc or {"project_id": project_id, "scope": "app", "pages": [], "include_payments": False}
+
+
+@api.post("/runs/{run_id}/chaos/start")
+async def start_chaos(run_id: str, body: ChaosStartBody, user: User = Depends(current_user)):
+    """Start architecture-aware Chaos Lab (fixed load or crash-test ramp)."""
+    from chaos_lab import run_chaos_lab
+
+    run = await require_run_for_user(db, run_id, user.user_id, permission="runs:start")
+    project = await db.projects.find_one({"project_id": run["project_id"]}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    mode = body.mode if body.mode in {"fixed", "crash"} else "fixed"
+    scope = body.scope if body.scope in {"app", "pages"} else "app"
+    pages = await _resolve_chaos_pages(project, body.pages, scope, user.user_id)
+    users = max(1, min(int(body.users), 500))
+    max_users = max(users, min(int(body.max_users), 2000))
+    hold = max(3.0, min(float(body.hold_secs), 60.0))
+
+    seed = {
+        "status": "running",
+        "mode": mode,
+        "scope": scope,
+        "pages": pages,
+        "users": users,
+        "max_users": max_users,
+        "include_payments": body.include_payments,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.test_runs.update_one(
+        {"run_id": run_id},
+        {"$set": {"chaos_summary": seed, "swarm_summary": {**seed, "legacy_alias": True}}},
+    )
+
+    async def _go():
+        ide = await get_ide_context(db, user.user_id) or {}
+
+        async def on_progress(ev: dict[str, Any]) -> None:
+            kind = ev.get("type") or "chaos"
+            payload = {k: v for k, v in ev.items() if k != "type"}
+            payload.update({
+                "run_id": run_id,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "kind": "chaos_event",
+                "event": kind,
+            })
+            await db.run_events.insert_one(dict(payload))
+            await _publish(run_id, {k: v for k, v in payload.items() if k != "_id"})
+            # Mirror key milestones onto swarm_summary for older UI
+            if kind in {"chaos_metrics", "chaos_stage", "chaos_completed"}:
+                patch = {"chaos_summary.live": payload}
+                if kind == "chaos_completed":
+                    patch = {}
