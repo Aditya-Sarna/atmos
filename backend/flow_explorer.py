@@ -629,3 +629,51 @@ async def explore_app_flow(
         pathname = _pathname(p.url)
         idx = len(screens)
         name = _screen_name(txt, pathname, idx)
+        slug = f"scr{idx:02d}_{_safe_name(pathname.strip('/') or 'home')}"
+        fields = await _enumerate_inputs(p)
+        buttons = await _enumerate_buttons(p)
+        shot = await _capture_screen_png(p, run_id, slug, vp_label)
+        screen = {
+            "screen_id": f"scr_{uuid.uuid4().hex[:8]}",
+            "name": name, "purpose": "",
+            "url": p.url, "route": pathname,
+            "title": txt.get("title",""), "heading": txt.get("heading",""),
+            "body_snippet": txt.get("body",""), "signature": sig,
+            "path": [dict(s) for s in path],
+            "fields": fields, "buttons": buttons,
+            "viewport": vp_label, "slug": slug,
+            "screenshot_url": shot.get("url_path"),
+        }
+        by_sig[sig] = screen
+        screens.append(screen)
+        pages_out.append({
+            "url": p.url, "title": txt.get("title") or name,
+            "slug": slug, "route": pathname,
+            "captures": {vp_label: {"ok": shot.get("ok", False),
+                                     "url_path": shot.get("url_path"),
+                                     "image_hash": shot.get("image_hash")}},
+        })
+        if on_progress:
+            try:
+                await on_progress({
+                    "type": "screen", "screen_id": screen["screen_id"],
+                    "name": name, "route": pathname, "url": p.url,
+                    "heading": txt.get("heading",""),
+                    "field_count": len(fields),
+                    "fields": [f.get("label_text") or f.get("name") or f.get("type") for f in fields],
+                    "screenshot_url": shot.get("url_path"), "viewport": vp_label,
+                })
+            except Exception:
+                pass
+        await _emit_live(on_progress, p, f"Screen: {name}")
+        return screen
+
+    hub_path: list[dict[str, Any]] = []
+    
+    # ── Try Visual VLM (Gemini 3.5 Flash style) Crawling ────────────────────
+    vlm_success_actions = 0
+    vlm_stagnation = 0
+    failed_targets: list[str] = []
+    try:
+        path: list[dict[str, Any]] = [{"op": "goto", "url": base_url}]
+        await page.goto(base_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
