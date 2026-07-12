@@ -821,3 +821,51 @@ async def explore_app_flow(
                                 new_path = current_path + [{"op":"click","text":b.get("text",""),
                                                             "rect":b.get("rect"),"role":b.get("type")}]
                                 registered = await _register(hub_page, new_path)
+                                if registered:
+                                    button_actions.append({
+                                        "label": b.get("text",""), "from": before_url,
+                                        "to": hub_page.url, "navigated": before_url != hub_page.url,
+                                        "route": _pathname(hub_page.url),
+                                    })
+                                    if hub_page.url != before_url and len(new_path) <= MAX_FLOW_STEPS + 4:
+                                        frontier.append(new_path)
+
+                            if hub_page.url != hub_url:
+                                try:
+                                    await hub_page.go_back(timeout=3000)
+                                    await _settle(hub_page)
+                                    if _pathname(hub_page.url) != _pathname(hub_url):
+                                        await replay_path(hub_page, current_path)
+                                except Exception:
+                                    await replay_path(hub_page, current_path)
+                        except Exception as exc:
+                            logger.debug("fan-out click failed (%s): %s", b.get("text"), exc)
+                            try:
+                                await replay_path(hub_page, current_path)
+                            except Exception:
+                                break
+                except Exception as exc:
+                    logger.debug("fan-out node failed: %s", exc)
+                finally:
+                    try:
+                        await hub_page.close()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.warning("BFS fallback crawl failed: %s", exc)
+
+    # ── Phase C: tag keypad/PIN screens for fuzz ─────────────────────────
+    for screen in screens:
+        if not screen.get("fields"):
+            body = (screen.get("heading","") + " " + screen.get("body_snippet","")).lower()
+            if any(k in body for k in ("pin","passcode","code","secret")):
+                screen["keypad_screen"] = True
+
+    try:
+        await page.close()
+        await ctx.close()
+    except Exception:
+        pass
+
+    logger.info("Flow explorer: %d screens, %d button actions", len(screens), len(button_actions))
+    return {"screens": screens, "pages": pages_out, "button_actions": button_actions}
