@@ -96,3 +96,97 @@ def _ensure_playwright_browsers() -> None:
                 or any(loc.glob("chrome-headless-shell-*/chrome-headless-shell"))
                 or any(loc.glob("chrome-mac*/Chromium.app"))
                 or any(loc.glob("chrome-win*/chrome.exe"))
+            )
+            if has_bin:
+                found_any_binary = True
+        if expected_dirs:
+            needs_install = not found_any_binary
+        else:
+            # Old playwright versions — fall back to the simple glob check.
+            candidate = list(browsers_dir.glob("chromium_headless_shell-*")) + list(browsers_dir.glob("chromium-*"))
+            needs_install = not any(
+                (d / "chrome-linux" / "headless_shell").exists()
+                or any(d.glob("chrome-headless-shell-*/chrome-headless-shell"))
+                for d in candidate
+            )
+        if not needs_install:
+            return
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("playwright dry-run check failed (%s); assuming install needed.", exc)
+
+    _log.warning(
+        "Playwright chromium binary missing under %s (expected %s); running `playwright install chromium`…",
+        browsers_dir, expected_dirs or "(unknown version)",
+    )
+    try:
+        env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(browsers_dir)}
+        subprocess.run([playwright_bin, "install", "chromium"], check=True, env=env, timeout=600)
+        _log.info("Playwright chromium installed.")
+    except Exception as exc:  # noqa: BLE001
+        _log.error("Could not auto-install Playwright chromium: %s", exc)
+
+
+_ensure_playwright_browsers()
+
+
+from atmos_engine import (
+    SCREENSHOTS_DIR,
+    VIDEOS_DIR,
+    VIEWPORTS as REAL_VIEWPORTS,
+    configure_playwright_browsers,
+    crawl_and_capture,
+    capture_routes_direct,
+    apply_patch_full_page,
+    llm_analyze_app,
+    llm_analyze_page,
+    deterministic_fallback,
+    seed_test_cases,
+)
+from architecture_analyzer import analyze_repo, analyze_url_run
+from fuzz_generator import run_fuzz_suite, _classify_field, fuzz_flow_screens
+from github_runner import boot_repo, parse_github_url
+from github_pr import PatchSpec, open_pull_request
+from route_extractor import extract_routes_from_source
+from route_context import build_route_contexts
+from flow_explorer import explore_app_flow
+from screen_testcases import generate_and_run_screen_tests
+from load_simulator import LoadSimulator, LoadProfile, UserMode
+from payment_sandbox import PaymentSandbox, TestPaymentGenerator, PaymentProvider
+from ship_report import ShipReportGenerator
+from persona_engine import run_persona_simulations, PERSONA_DEFINITIONS
+from rbac import (
+    ALL_PERMISSIONS,
+    BUILTIN_ROLES,
+    DEFAULT_ROLE_PERMISSIONS,
+    ensure_org_for_user,
+    get_member,
+    get_role_permissions,
+    get_user_permissions,
+    project_query_for_user,
+    require_permission,
+)
+from custom_test_runner import run_custom_test_cases, run_plan_cases_playwright, VALID_ACTIONS
+from a11y_engine import run_accessibility_audit
+from command_profiles import get_command_profile
+from reference_engine import enrich_issues_with_references, ensure_reference_cache, get_references_for_query
+from funnel_analyzer import analyze_conversion_funnel
+from competitive_diff import run_competitive_diffs
+from design_theory_engine import analyze_design_theory, CONTEXT_THEMES
+from dopamine_engine import analyze_dopamine_engagement
+from test_plan_editor import generate_test_plan, update_test_plan, enabled_cases_from_plan
+from user_llm_proxy import get_user_llm_config
+from codebase_context import store_ide_context, get_ide_context, build_context_summary
+from copywriting_engine import analyze_copywriting, MARKETING_PROFILES
+from demand_scraper import build_demand_report, REPORTS_DIR
+from ops import validate_startup_env, SimpleRateLimitMiddleware, RequestIdMiddleware
+from craft_score import (
+    DEFAULT_GATE_THRESHOLD,
+    attach_craft_to_summary,
+    evaluate_gate,
+    render_craft_markdown,
+)
+from tenant_guard import require_run_for_user, require_project_for_user
+
+configure_playwright_browsers()
+
+# ----------------------------------------------------------------------------
