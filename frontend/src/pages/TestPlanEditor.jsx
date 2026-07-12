@@ -164,3 +164,86 @@ export default function TestPlanEditor() {
             <section className="card-elev p-6 space-y-3">
               <div className="flex items-center justify-between">
                 <h2 className="font-medium">Test cases ({plan.test_cases?.length || 0})</h2>
+                <Button variant="outline" size="sm" className="rounded-full" onClick={addCase}>
+                  <Plus className="h-3.5 w-3.5 mr-1" /> Add case
+                </Button>
+              </div>
+              {(plan.test_cases || []).map((tc, idx) => (
+                <div key={tc.id || idx} className="p-4 rounded-xl border border-black/8 bg-white space-y-2">
+                  <div className="flex items-start gap-3">
+                    <GripVertical className="h-4 w-4 mt-2 text-[#86868B]" />
+                    <div className="flex-1 space-y-2">
+                      <Input value={tc.name} onChange={(e) => updateCase(idx, "name", e.target.value)} />
+                      <div className="flex gap-2 items-center">
+                        <Select value={tc.category || "UX"} onValueChange={(v) => updateCase(idx, "category", v)}>
+                          <SelectTrigger className="w-36 h-8"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {["UX", "Visual", "Functional", "Accessibility"].map((c) => (
+                              <SelectItem key={c} value={c}>{c}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <label className="flex items-center gap-2 text-sm">
+                          <Switch checked={tc.enabled !== false} onCheckedChange={(v) => updateCase(idx, "enabled", v)} />
+                          Enabled
+                        </label>
+                      </div>
+                      <Textarea
+                        value={(tc.steps || []).join("\n")}
+                        onChange={(e) => updateCase(idx, "steps", e.target.value.split("\n").filter(Boolean))}
+                        rows={3}
+                        placeholder="One step per line"
+                        className="font-mono text-sm"
+                      />
+                    </div>
+                    <Button variant="ghost" size="icon" onClick={() => setPlan((p) => ({
+                      ...p,
+                      test_cases: p.test_cases.filter((_, i) => i !== idx),
+                    }))}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </section>
+
+            <section className="card-elev p-6 space-y-4">
+              <h2 className="font-medium">Run options</h2>
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-medium flex items-center gap-2">
+                    <Zap className="h-4 w-4 text-[#FF9500]" /> Dopamine max suggestions
+                  </div>
+                  <p className="text-xs text-[#86868B]">
+                    Dark-pattern audit always runs. Turn this on for expanded ethical engagement ideas.
+                  </p>
+                </div>
+                <Switch checked={dopamine} onCheckedChange={setDopamine} />
+              </div>
+              <div>
+                <label className="text-sm text-[#86868B]">Design context theme</label>
+                <Select value={designTheme || "auto"} onValueChange={(v) => setDesignTheme(v === "auto" ? "" : v)}>
+                  <SelectTrigger className="mt-1"><SelectValue placeholder="Auto from app type" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto (from app type)</SelectItem>
+                    {themes.map(([k, v]) => (
+                      <SelectItem key={k} value={k}>{v.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </section>
+
+            <div className="flex gap-3">
+              <Button onClick={runPlan} disabled={busy} className="rounded-full bg-[#1D1D1F] text-white">
+                <Play className="h-4 w-4 mr-1" /> Approve & run
+              </Button>
+              <Button variant="outline" onClick={savePlan} disabled={busy} className="rounded-full">Save draft</Button>
+              <Button variant="ghost" onClick={handleGenerate} disabled={generating} className="rounded-full">Regenerate</Button>
+            </div>
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
