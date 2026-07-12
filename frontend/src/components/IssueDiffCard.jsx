@@ -264,3 +264,12 @@ export default function IssueDiffCard({ issue, runId }) {
           </div>
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {issue.ui_references.map((ref) => (
+              <div key={ref.ref_id} className="rounded-xl border border-black/8 overflow-hidden bg-[#F5F5F7]">
+                {ref.image_url && (
+                  <img src={ref.image_url} alt={ref.pattern} className="w-full h-24 object-cover" loading="lazy" />
+                )}
+                <div className="p-3">
+                  <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-[#86868B]">
+                    <span className="font-medium text-[#0071E3]">{ref.source}</span>
+                    <span>· {ref.app}</span>
+                  </div>
