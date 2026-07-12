@@ -1412,3 +1412,97 @@ async def _execute_run(
                     for p in personas:
                         await _emit(run_id, seq, "log", {
                             "level": "info",
+                            "message": f"Persona {p['label']}: {p['score']}/100 — {p.get('rules_passed', 0)}/{p.get('rules_total', 0)} rules passed",
+                        })
+
+                # ── Phase 4: Issues — patch & re-capture full pages ─────
+                emitted_issues: list[dict[str, Any]] = []
+                if profile["includes"]("issues"):
+                    await _emit(run_id, seq, "phase", {"phase": "issues", "label": "Executed Fixes"})
+                pages_by_url = {p["url"]: p for p in pages}
+
+                for raw in (aggregated_issues[:12] if profile["includes"]("issues") else []):
+                    page_url = raw.get("page_url") or pages[0]["url"]
+                    target_page = pages_by_url.get(page_url) or pages[0]
+                    vp_label = raw.get("viewport_label") if raw.get("viewport_label") in vp_labels else "Desktop 1440"
+
+                    # baseline already captured during crawl
+                    before_cap = target_page["captures"].get(vp_label) or next(
+                        (c for c in target_page["captures"].values() if c.get("ok")), {}
+                    )
+                    before_url = before_cap.get("url_path")
+
+                    iss_id = f"iss_{uuid.uuid4().hex[:8]}"
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Applying patch for ‘{raw.get('title', 'issue')}’ on {target_page['url']} ({vp_label})…"})
+
+                    after_result = await apply_patch_full_page(
+                        browser, target_page["url"], vp_label,
+                        raw.get("patch_css", ""), run_id, f"{iss_id}_after", target_page["slug"],
+                        baseline_url_path=before_url,
+                    )
+
+                    alts_out = []
+                    for ai, alt in enumerate((raw.get("alternatives") or [])[:2]):
+                        alt_result = await apply_patch_full_page(
+                            browser, target_page["url"], vp_label,
+                            alt.get("patch_css", ""), run_id, f"{iss_id}_alt{ai}", target_page["slug"],
+                            baseline_url_path=before_url,
+                        )
+                        alts_out.append({
+                            "label": alt.get("label", f"Alternative {ai+1}"),
+                            "summary": alt.get("summary", ""),
+                            "tradeoff": alt.get("tradeoff", ""),
+                            "patch_css": alt.get("patch_css", ""),
+                            "screenshot_url": alt_result.get("after_url"),
+                            "diff_url": alt_result.get("diff_url"),
+                            "changed_pct": alt_result.get("changed_pct"),
+                            "applied": alt_result.get("applied"),
+                            "no_op_reason": alt_result.get("no_op_reason"),
+                        })
+
+                    issue_full = {
+                        "id": iss_id,
+                        "category": raw.get("category", "UX"),
+                        "severity": raw.get("severity", "medium"),
+                        "title": raw.get("title", "Untitled issue"),
+                        "cause": raw.get("cause", ""),
+                        "page_url": target_page["url"],
+                        "page_title": target_page.get("title", ""),
+                        "viewport": vp_label,
+                        "before": {
+                            "headline": raw.get("title", ""),
+                            "detail": raw.get("cause", ""),
+                            "screenshot_url": before_url,
+                        },
+                        "after": {
+                            "headline": "Atmos applied this fix",
+                            "detail": raw.get("patch_explanation", ""),
+                            "code": raw.get("patch_css", ""),
+                            "screenshot_url": after_result.get("after_url"),
+                        },
+                        "diff_url": after_result.get("diff_url"),
+                        "changed_pct": after_result.get("changed_pct"),
+                        "applied": after_result.get("applied"),
+                        "no_op_reason": after_result.get("no_op_reason"),
+                        "alternatives": alts_out,
+                        "patch_kind": "css_patch",
+                    }
+                    emitted_issues.append(issue_full)
+                    await _emit(run_id, seq, "issue", issue_full)
+
+                # Enrich issues with Mobbin/Pinterest UI references
+                emitted_issues = await enrich_issues_with_references(db, emitted_issues, app_type)
+                for iss in emitted_issues:
+                    if iss.get("ui_references"):
+                        await _emit(run_id, seq, "ui_reference", {
+                            "issue_id": iss["id"],
+                            "references": iss["ui_references"],
+                        })
+
+                # ── Phase 5: Fuzz / boundary input test cases ───────────
+                fuzz_cases: list[dict[str, Any]] = []
+                if profile["includes"]("fuzz"):
+                    await _emit(run_id, seq, "phase", {"phase": "fuzz", "label": "Boundary Input Fuzzing"})
+                    for url in [p["url"] for p in pages[:4]]:
+                        try:
