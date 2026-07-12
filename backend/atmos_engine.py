@@ -1098,3 +1098,90 @@ async def capture_routes_direct(
                         })
                     except Exception:  # noqa: BLE001
                         pass
+                else:
+                    seen_hashes[desktop_hash] = route
+            pages.append(page_entry)
+    finally:
+        for _, ctx in contexts:
+            try:
+                await ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return {"pages": pages, "button_actions": button_actions}
+
+
+async def apply_patch_full_page(
+    browser: Browser,
+    url: str,
+    vp_label: str,
+    css: str,
+    run_id: str,
+    tag: str,
+    page_slug: str,
+    baseline_url_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """Re-open the page, inject CSS, take a FULL-PAGE screenshot.
+
+    Guarantees the `after` image is visibly different from `before`:
+      1. If the CSS selectors don't match anything, inject a bright diagnostic
+         banner so the user can SEE the patch was a no-op.
+      2. Pixel-diff before vs after; if identical, escalate (focus + diagnostic).
+      3. Always emit a side-by-side pixel-diff PNG so the user can spot the
+         changed regions in red.
+    Returns: { ok, after_url, diff_url, changed_pct, applied, no_op_reason }
+    """
+    css = (css or "").strip()
+    if not css:
+        return {"ok": False, "applied": False, "no_op_reason": "empty patch"}
+
+    vp = next((v for v in VIEWPORTS if v["label"] == vp_label), VIEWPORTS[-1])
+    ctx = await _new_context(browser, vp)
+    slug = f"{page_slug}_{tag}"
+    baseline_path = SCREENSHOTS_DIR / Path(baseline_url_path).name if baseline_url_path else None
+    baseline_bytes = _screenshot_bytes(baseline_path) if baseline_path else None
+
+    no_op_reason: Optional[str] = None
+    selectors_matched = True
+
+    async def _capture(slug_suffix: str, *, emphasize: bool, force_banner: Optional[str] = None) -> Optional[str]:
+        nonlocal selectors_matched
+        page = await ctx.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            await _settle(page)
+            await _fill_visible_forms(page)
+            await page.wait_for_timeout(300)
+            selectors_matched = await _selectors_match_anything(page, css)
+            await _inject_patch_css(page, css, emphasize_interaction=emphasize)
+            if force_banner:
+                await _add_diagnostic_banner(page, force_banner, color="#FF9500")
+            fname = f"{run_id}_{_safe_name(slug_suffix)}_{_safe_name(vp_label)}_patch.png"
+            path = SCREENSHOTS_DIR / fname
+            png = await page.screenshot(full_page=True, timeout=20000)
+            path.write_bytes(png)
+            return f"/api/screens/{fname}"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Patch capture failed (%s @ %s): %s", slug_suffix, url, exc)
+            return None
+        finally:
+            try:
+                await page.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    try:
+        url_path = await _capture(slug, emphasize=False)
+        if not url_path:
+            return {"ok": False, "applied": False, "no_op_reason": "page capture failed"}
+
+        patch_bytes = _screenshot_bytes(SCREENSHOTS_DIR / Path(url_path).name)
+
+        if not selectors_matched:
+            no_op_reason = "selectors did not match any DOM element"
+            url_path = await _capture(
+                f"{slug}_diag", emphasize=True,
+                force_banner=f"Atmos diagnostic: patch selectors did not match this page — fix needs different selectors.",
+            ) or url_path
+            patch_bytes = _screenshot_bytes(SCREENSHOTS_DIR / Path(url_path).name)
+        elif baseline_bytes is not None and patch_bytes == baseline_bytes:
