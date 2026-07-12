@@ -37,7 +37,7 @@ export function TestCaseList({ cases = [], activeId, onSelect, currentSteps = {}
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-medium leading-snug">{tc.name}</div>
                 <div className="flex items-center gap-2 mt-1">
-                  <span className="text-[10px] uppercase tracking-[0.18em] text-[#86868B]">{tc.category}</span>
+                  <span className="text-[10px] uppercase tracking-[0.18em] text-[#86868B]">{tc.category || (tc.source === "custom" ? "Custom" : "Auto")}</span>
                   {tc.status === "running" && (
                     <span className="text-[10px] text-[#86868B]">step {Math.max(0, stepIdx + 1)}/{tc.steps?.length || 0}</span>
                   )}
@@ -78,7 +78,14 @@ export function TestCaseTheatre({ testCase, currentStep }) {
         </span>
       </div>
 
-      {testCase.frames && testCase.frames.length > 0 ? (
+      {testCase.video_url ? (
+        <video
+          src={`${process.env.REACT_APP_BACKEND_URL}${testCase.video_url}`}
+          controls
+          className="w-full rounded-xl bg-black/5"
+          data-testid={`test-case-video-${testCase.id}`}
+        />
+      ) : testCase.frames && testCase.frames.length > 0 ? (
         <RealShot
           urlPath={testCase.frames[Math.min(Math.max(0, currentStep), testCase.frames.length - 1)]}
           label={`step ${Math.min(currentStep + 1, (testCase.steps || []).length)}/${(testCase.steps || []).length}`}
