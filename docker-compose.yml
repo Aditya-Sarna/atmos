@@ -1,0 +1,46 @@
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - atmos_mongo:/data/db
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      DB_NAME: atmos
+      ATMOS_ENV: production
+      ATMOS_DISABLE_AUTH: "0"
+      CORS_ORIGINS: http://localhost:3000
+      ATMOS_ALLOW_EMERGENT_FALLBACK: "0"
+      ATMOS_SCREENSHOTS_DIR: /data/screenshots
+      ATMOS_VIDEOS_DIR: /data/videos
+      ATMOS_REPORTS_DIR: /data/reports
+    ports:
+      - "8000:8000"
+    volumes:
+      - atmos_media:/data
+    depends_on:
+      - mongo
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      REACT_APP_BACKEND_URL: http://localhost:8000
+      REACT_APP_DISABLE_AUTH: "0"
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  atmos_mongo:
+  atmos_media:
