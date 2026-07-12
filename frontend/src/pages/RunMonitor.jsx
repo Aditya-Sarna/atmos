@@ -593,3 +593,102 @@ export default function RunMonitor() {
                           <div className="text-sm font-semibold text-[#1D1D1F]">{g.name}</div>
                           {g.purpose && (
                             <div className="text-xs text-[#86868B] mt-0.5">{g.purpose}</div>
+                          )}
+                          {g.route && (
+                            <div className="text-[11px] font-mono text-[#1D1D1F]/50 mt-0.5">{g.route}</div>
+                          )}
+                        </div>
+                        <div className="grid md:grid-cols-2 gap-3">
+                          {g.cases.map((c, ci) => (
+                            <div key={`scrcase-${gi}-${ci}`} className="rounded-lg border border-black/10 p-2 bg-white">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-[12px] font-medium text-[#1D1D1F] truncate pr-2">
+                                  {c.case_name}
+                                </span>
+                                <span
+                                  className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded shrink-0"
+                                  style={{
+                                    color: SCREEN_VERDICT_COLOR[c.verdict] || "#86868B",
+                                    background: (SCREEN_VERDICT_COLOR[c.verdict] || "#86868B") + "1A",
+                                  }}
+                                >
+                                  {c.verdict}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-[#86868B] mb-1">
+                                <span className="font-mono">{c.field}</span> ← “{c.value || "(empty)"}”
+                                <span className="text-[#1D1D1F]/40"> · expects {c.expectation}</span>
+                              </div>
+                              {c.rationale && (
+                                <div className="text-[11px] text-[#1D1D1F]/60 mb-2">{c.rationale}</div>
+                              )}
+                              {c.video_url ? (
+                                <video
+                                  controls
+                                  preload="metadata"
+                                  className="w-full rounded bg-black"
+                                  src={`${BACKEND_URL}${c.video_url}`}
+                                />
+                              ) : c.screenshot_url ? (
+                                <img
+                                  alt={c.case_name}
+                                  className="w-full rounded"
+                                  src={`${BACKEND_URL}${c.screenshot_url}`}
+                                />
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="terminal p-4 md:p-5" data-testid="activity-feed">
+                <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.2em] text-white/40 mb-3">
+                  <span>Activity feed</span>
+                  <span>{events.length} events</span>
+                </div>
+                <ScrollArea className="h-72 scrollbar-thin">
+                  <div ref={feedRef} className="space-y-1 pr-2">
+                    {logs.map((l) => (
+                      <div key={l.seq} className="flex gap-3 anim-slide-up">
+                        <span className="text-white/30 tabular-nums shrink-0">{new Date(l.ts).toLocaleTimeString([], { hour12: false })}</span>
+                        <span className="text-white/85 break-words">{l.message}</span>
+                      </div>
+                    ))}
+                    {phases.map((p) => (
+                      <div key={`p-${p.seq}`} className="flex gap-3 anim-slide-up">
+                        <span className="text-white/30 tabular-nums shrink-0">{new Date(p.ts).toLocaleTimeString([], { hour12: false })}</span>
+                        <span className="text-[#0A84FF]">▸ {p.label}</span>
+                      </div>
+                    ))}
+                    {issues.map((i) => (
+                      <div key={`i-${i.seq}`} className="flex gap-3 anim-slide-up">
+                        <span className="text-white/30 tabular-nums shrink-0">{new Date(i.ts).toLocaleTimeString([], { hour12: false })}</span>
+                        <span style={{ color: SEV_COLOR[i.severity] || "#fff" }}>
+                          {i.severity}  {i.title} <span className="text-white/40">— {i.file}</span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              </div>
+            </TabsContent>
+
+            {/* TEST CASES */}
+            <TabsContent value="cases" className="grid md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-4 mt-4" data-testid="tab-cases-content">
+              <TestCaseList
+                cases={testCases}
+                activeId={selectedCaseId}
+                onSelect={setSelectedCaseId}
+                currentSteps={stepIndex}
+              />
+              <TestCaseTheatre
+                testCase={selectedCase}
+                currentStep={selectedCase ? (stepIndex[selectedCase.id] ?? (selectedCase.status !== "running" ? (selectedCase.steps?.length ?? 0) - 1 : -1)) : -1}
+              />
+            </TabsContent>
+
+            {/* ISSUES (diff cards) — optionally filtered by selected page */}
