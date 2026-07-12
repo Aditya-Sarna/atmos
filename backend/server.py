@@ -1318,3 +1318,97 @@ async def _execute_run(
                         except Exception as exc:  # noqa: BLE001
                             logger.warning("per-page analysis failed for %s: %s", p["url"], exc)
                             return p, {"page_summary": "", "issues": []}
+
+                analyses = await asyncio.gather(*[_analyze_one(pg) for pg in pages_for_analysis]) if pages_for_analysis else []
+
+                for p, page_analysis in analyses:
+                    summary_line = page_analysis.get("page_summary") or ""
+                    page_summaries.append({"url": p["url"], "title": p["title"], "summary": summary_line})
+                    if summary_line:
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"· {p['url']} — {summary_line}"})
+                    for raw in (page_analysis.get("issues") or [])[:5]:
+                        raw["page_url"] = p["url"]
+                        raw["viewport_label"] = raw.get("viewport_label") if raw.get("viewport_label") in vp_labels else "Desktop 1440"
+                        aggregated_issues.append(raw)
+
+                if not aggregated_issues:
+                    # Fallback to the holistic analyzer (or deterministic) if per-page found nothing.
+                    try:
+                        holistic = await llm_analyze_app(project, command, pages, db=db)
+                        aggregated_issues = list(holistic.get("issues") or [])
+                        focus_areas = holistic.get("focus_areas", []) or []
+                        narrative = holistic.get("narrative", "")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("holistic fallback failed: %s", exc)
+                        fb = deterministic_fallback(project, pages)
+                        aggregated_issues = list(fb.get("issues") or [])
+                        focus_areas = fb.get("focus_areas", []) or []
+                        narrative = fb.get("narrative", "")
+                else:
+                    focus_areas = [s["summary"].split(".")[0] for s in page_summaries if s["summary"]][:8]
+                    narrative = f"Atmos analyzed {len(pages)} pages and observed {len(aggregated_issues)} issues across them."
+
+                await _emit(run_id, seq, "log", {"level": "info", "message": narrative})
+                await _emit(run_id, seq, "plan", {"focus_areas": focus_areas})
+
+                # ── Phase 3: Real accessibility audit + Personas ───────
+                if profile["includes"]("accessibility"):
+                    await _emit(run_id, seq, "phase", {"phase": "accessibility", "label": "Accessibility Audit"})
+
+                    async def a11y_progress(ev: dict[str, Any]) -> None:
+                        if ev.get("type") == "a11y_log":
+                            await _emit(run_id, seq, "log", {"level": "info", "message": ev.get("message", "")})
+                        elif ev.get("type") == "a11y_page":
+                            await _emit(run_id, seq, "log", {"level": "info",
+                                "message": f"A11y {ev.get('url')}: score {ev.get('score')}/100 · {ev.get('findings')} finding(s)"})
+                        elif ev.get("type") == "a11y_report":
+                            await _emit(run_id, seq, "a11y_report", ev)
+
+                    try:
+                        a11y_result = await run_accessibility_audit(
+                            browser, target_url, pages,
+                            deep=bool(profile.get("a11y_deep")),
+                            mobile_preferred=bool(profile.get("mobile_viewports_only")),
+                            on_progress=a11y_progress,
+                        )
+                        # Promote a11y findings into issue stream for report/monitor
+                        for f in (a11y_result.get("findings") or [])[:8]:
+                            aggregated_issues.append({
+                                "category": "Accessibility",
+                                "severity": f.get("severity", "medium"),
+                                "title": f.get("title", "A11y finding"),
+                                "cause": f.get("cause", ""),
+                                "page_url": f.get("page_url") or target_url,
+                                "patch_css": "",
+                                "patch_explanation": "Fix accessible name, contrast, or keyboard path.",
+                                "alternatives": [],
+                            })
+                        await _emit(run_id, seq, "log", {"level": "info", "message": a11y_result.get("summary", "A11y audit complete")})
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("a11y audit failed: %s", exc)
+
+                if profile["includes"]("personas"):
+                    await _emit(run_id, seq, "phase", {"phase": "personas", "label": "Human Persona Simulation"})
+                persona_ids = None
+                if profile.get("persona_ids") == "all" or command == "/atmos personas":
+                    persona_ids = [p["id"] for p in PERSONA_DEFINITIONS]
+                elif isinstance(profile.get("persona_ids"), list):
+                    persona_ids = profile["persona_ids"]
+
+                async def persona_progress(ev: dict[str, Any]) -> None:
+                    if ev.get("type") == "persona_complete":
+                        await _emit(run_id, seq, "persona", ev)
+                    elif ev.get("type") == "persona_annotation":
+                        await _emit(run_id, seq, "persona_annotation", ev)
+
+                personas = []
+                if profile["includes"]("personas"):
+                    personas = await run_persona_simulations(
+                        browser, target_url, run_id,
+                        on_progress=persona_progress,
+                        persona_ids=persona_ids,
+                    )
+                    for p in personas:
+                        await _emit(run_id, seq, "log", {
+                            "level": "info",
