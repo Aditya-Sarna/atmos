@@ -284,3 +284,97 @@ class TestRun(BaseModel):
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
     summary: Optional[dict[str, Any]] = None
+
+
+# ----------------------------------------------------------------------------
+# Auth
+# ----------------------------------------------------------------------------
+
+EMERGENT_SESSION_DATA_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+AUTH_BYPASS_MODE = os.environ.get("ATMOS_DISABLE_AUTH", "auto").strip().lower()
+
+
+def _auth_bypass_enabled(request: Request) -> bool:
+    if AUTH_BYPASS_MODE in {"1", "true", "yes"}:
+        return True
+    if AUTH_BYPASS_MODE in {"0", "false", "no"}:
+        return False
+    host = (request.url.hostname or "").lower()
+    # Default "auto": allow bypass only for local development hosts.
+    return host in {"localhost", "127.0.0.1"}
+
+
+async def _exchange_session_id(session_id: str) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=15) as http:
+        r = await http.get(EMERGENT_SESSION_DATA_URL, headers={"X-Session-ID": session_id})
+        if r.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid session_id")
+        return r.json()
+
+
+async def current_user(request: Request) -> User:
+    if _auth_bypass_enabled(request):
+        user = User(
+            user_id="user_local_dev",
+            email="local-dev@atmos.local",
+            name="Local Dev",
+            picture=None,
+        )
+        await db.users.update_one(
+            {"user_id": user.user_id},
+            {"$set": {
+                "user_id": user.user_id,
+                "email": user.email,
+                "name": user.name,
+                "picture": user.picture,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }},
+            upsert=True,
+        )
+        return user
+
+    token = request.cookies.get("session_token")
+    if not token:
+        auth = request.headers.get("authorization")
+        if auth and auth.startswith("Bearer "):
+            token = auth[len("Bearer "):]
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+    expires_at = session["expires_at"]
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Session expired")
+
+    user_doc = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=401, detail="User not found")
+    return User(**user_doc)
+
+
+class SessionExchangeBody(BaseModel):
+    session_id: str
+
+
+class LocalAuthBody(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    name: Optional[str] = None
+
+
+def _hash_password(password: str) -> str:
+    import bcrypt
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    import bcrypt
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
