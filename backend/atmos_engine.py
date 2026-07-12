@@ -924,3 +924,90 @@ async def capture_routes_direct(
             await page.evaluate(
                 "() => { localStorage.setItem('isAuthenticated', 'true'); }"
             )
+            await page.wait_for_timeout(100)
+            # Try one unlock button
+            await _click_button_by_text(page, "continue")
+            await page.wait_for_timeout(400)
+            current = _normalize(page.url).lower()
+            # Success if we've moved away from auth keyword routes
+            return not any(kw in current for kw in AUTH_DETECT_KEYWORDS)
+        except Exception:  # noqa: BLE001
+            return False
+
+    try:
+        for idx, route in enumerate(routes[:MAX_PAGES]):
+            url = base_url + (route if route != "/" else "")
+            route_start_time = time.time()
+            try:
+                await discovery_page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                await _settle(discovery_page)
+                await discovery_page.wait_for_timeout(SETTLE_WAIT_MS)
+
+                current_url = _normalize(discovery_page.url)
+                # If we're on an auth screen and this isn't supposed to be an auth route, try unlock
+                if _is_auth_screen(current_url) and not _is_auth_screen(url):
+                    unlocked = await _try_quick_unlock(discovery_page)
+                    if not unlocked:
+                        logger.info("Route %s appears to be auth-protected, skipping detailed exploration", route)
+                        await _emit_frame(on_progress, discovery_page, f"Skipped (auth): {route}")
+                        continue  # Skip this route — can't explore without credentials
+
+                await _emit_frame(on_progress, discovery_page, f"Direct → {route}")
+
+                # Short route context + action
+                route_ctx = (route_contexts or {}).get(route, {})
+                action_result = await _perform_context_action(
+                    discovery_page,
+                    route=route,
+                    context_hint=route_ctx,
+                )
+                if on_progress:
+                    try:
+                        await on_progress({
+                            "type": "route_context",
+                            "route": route,
+                            "url": url,
+                            "source_files": route_ctx.get("files", []),
+                            "action": action_result.get("action"),
+                            "filled_fields": action_result.get("filled_fields", 0),
+                            "clicked_cta": action_result.get("clicked_cta"),
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                # Click fewer buttons, faster
+                buttons = await _enumerate_buttons(discovery_page)
+                for b in buttons[:MAX_CLICKS_PER_PAGE]:
+                    if time.time() - route_start_time > ROUTE_TIMEOUT_SECS:
+                        break  # Timeout per route
+                    pre_url = _normalize(discovery_page.url)
+                    clicked = await _click_button_by_text(discovery_page, b)
+                    if not clicked:
+                        continue
+                    try:
+                        await discovery_page.wait_for_load_state("networkidle", timeout=1500)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    await discovery_page.wait_for_timeout(200)
+                    post_url = _normalize(discovery_page.url)
+                    await _emit_frame(
+                        on_progress, discovery_page,
+                        f"Clicked: {b['text']} {'(icon)' if b.get('isIcon') else ''}",
+                    )
+                    button_actions.append({
+                        "label": b["text"],
+                        "isIcon": b.get("isIcon", False),
+                        "from": pre_url,
+                        "to": post_url,
+                        "navigated": pre_url != post_url,
+                        "route": route,
+                    })
+                    # Quick return to route
+                    if _normalize(discovery_page.url) != _normalize(url):
+                        try:
+                            await discovery_page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                            await _settle(discovery_page)
+                            await discovery_page.wait_for_timeout(200)
+                        except Exception:  # noqa: BLE001
+                            break
+                
