@@ -188,3 +188,98 @@ async def _audit_dark_patterns(page) -> list[dict[str, Any]]:
           // Roach motel — easy signup language, hard cancel
           if (/sign up in seconds|instant (access|account)|one.?click (signup|join)/i.test(text)
               && !/cancel (anytime|easily)|unsubscribe|manage subscription/i.test(text)) {
+            add('roach_motel', 'Easy in / hard out (roach motel signal)', 'medium',
+              'easy signup without cancel path copy',
+              'Surface cancel/unsubscribe with equal clarity to signup.',
+              'obstruction');
+          }
+
+          // Forced continuity
+          if (/free trial|then\\s+\\$?\\d+|auto.?renew|will be charged|subscription starts/i.test(text)
+              && !/cancel before|remind me before charge|no charge until/i.test(text)) {
+            add('forced_continuity', 'Forced continuity risk', 'high',
+              'trial/auto-renew language',
+              'Disclose renewal date, price, and one-click cancel before collecting payment.',
+              'forced_continuity');
+          }
+
+          // Privacy zuckering — over-broad consent
+          if (/by (continuing|clicking|signing).*(agree|accept).*(privacy|terms|cookies|partners|third.?party)/i.test(text)
+              && /all (partners|purposes)|share with|sell (your )?data/i.test(text)) {
+            add('privacy_zuckering', 'Bundled / coercive privacy consent', 'high',
+              'bundled agree-to-everything copy',
+              'Separate essential terms from marketing/data-sharing; allow granular consent.',
+              'privacy');
+          }
+
+          // Trick questions / double negatives in forms
+          if (/uncheck.*(if you|to not)|do not uncheck|opt.?out by (un)?checking/i.test(text)) {
+            add('trick_question', 'Trick question / confusing opt-out', 'medium',
+              'double-negative opt-out copy',
+              'Use plain language: checked = yes, unchecked = no.',
+              'interface_interference');
+          }
+
+          // Social proof that may be fabricated
+          if (/\\d+\\s+(people|users|shoppers)\\s+(bought|purchased|viewing)/i.test(text)
+              && !/updated|live from/i.test(text)) {
+            add('social_proof_pressure', 'Pressure social proof', 'low',
+              'N people bought/viewing',
+              'If shown, back with real-time verified counts or remove.',
+              'urgency');
+          }
+
+          return findings;
+        }"""
+    )
+    return list(raw or [])
+
+
+def _generate_suggestions(
+    signals: dict[str, Any],
+    app_type: str,
+    *,
+    engagement_max: bool = False,
+) -> list[dict[str, Any]]:
+    profile = DOPAMINE_PROFILES.get(app_type, DOPAMINE_PROFILES["generic"])
+    suggestions: list[dict[str, Any]] = []
+
+    if not signals.get("hasProgress") and not signals.get("hasSteps"):
+        suggestions.append({
+            "id": "add_progress",
+            "title": "Add visible progress feedback",
+            "thesis": "Variable reward + progress visibility increases task completion up to 40% (HCI research).",
+            "recommendation": "Add a step indicator or progress bar to multi-step flows.",
+            "impact": "high",
+            "pattern_ref": "progress_indicator",
+            "kind": "engagement",
+        })
+
+    if signals.get("formCount", 0) > 0 and not signals.get("hasCelebration"):
+        suggestions.append({
+            "id": "completion_moment",
+            "title": "Missing completion celebration",
+            "thesis": "A clear success moment (checkmark, subtle animation) reinforces the reward loop after form submit.",
+            "recommendation": "Add a success screen or toast with positive visual feedback after primary conversions.",
+            "impact": "high",
+            "pattern_ref": "micro_celebration",
+            "kind": "engagement",
+        })
+
+    if signals.get("hasEmptyState") and signals.get("ctaCount", 0) < 3:
+        suggestions.append({
+            "id": "empty_first_win",
+            "title": "Empty state needs a fast first win",
+            "thesis": "Users get a healthy dopamine spike on first accomplishment — guide to one quick action within 60 seconds.",
+            "recommendation": "Replace passive empty states with a single prominent 'Create your first X' CTA.",
+            "impact": "high",
+            "pattern_ref": "empty_state_action",
+            "kind": "engagement",
+        })
+
+    if not signals.get("hasSkeleton") and signals.get("ctaCount", 0) > 5:
+        suggestions.append({
+            "id": "skeleton_loading",
+            "title": "Add skeleton loading states",
+            "thesis": "Perceived wait time drops when users see content-shaped placeholders (skeleton screens).",
+            "recommendation": "Use skeleton UI during data fetches instead of spinners or blank screens.",
