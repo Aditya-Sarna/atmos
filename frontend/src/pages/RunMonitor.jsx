@@ -1286,3 +1286,102 @@ function FuzzCaseList({ cases }) {
         <span className="rounded-full bg-[#FF9500]/10 text-[#B25E00] px-3 py-1">Warn {counts.warn}</span>
         {counts.pending > 0 && (
           <span className="rounded-full bg-[#F5F5F7] text-[#86868B] px-3 py-1">Running {counts.pending}</span>
+        )}
+        <span className="ml-auto text-[#86868B]">{cases.length} cases · 8 archetypes</span>
+      </div>
+      {groups.map((g) => (
+        <div key={g.arche} className="card-elev p-4 md:p-5" data-testid={`fuzz-group-${g.arche}`}>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">{g.arche}</div>
+          <div className="space-y-3">
+            {g.fields.map((f) => (
+              <div key={f.field}>
+                <div className="text-sm font-medium mb-1">{f.field}</div>
+                <div className="rounded-lg overflow-hidden border border-black/5">
+                  <table className="w-full text-xs">
+                    <tbody>
+                      {f.items.map((c) => (
+                        <tr key={c.id} className="border-t border-black/5 align-top">
+                          <td className="px-3 py-2 align-top w-20">
+                            <span className="text-[10px] uppercase tracking-wider" style={{ color: statusColor[c.status] || "#86868B" }}>
+                              {c.status || "…"}
+                            </span>
+                          </td>
+                          {/* value_sent is the backend field; fall back to value for older events */}
+                          <td className="px-3 py-2 align-top w-1/3 font-mono break-all">
+                            {String(c.value_sent ?? c.value ?? "").slice(0, 80) || <span className="text-[#86868B]">(empty)</span>}
+                          </td>
+                          {/* expected_result is the backend field */}
+                          <td className="px-3 py-2 align-top text-[#1D1D1F]/80">
+                            {c.expected_result || c.expectation || c.name || ""}
+                          </td>
+                          {/* explanation is the backend field */}
+                          <td className="px-3 py-2 align-top text-[#86868B]">
+                            {c.explanation || c.actual || ""}
+                          </td>
+                          {/* Evidence: prefer video, fall back to screenshot */}
+                          <td className="px-3 py-2 align-top w-28">
+                            {c.video_url ? (
+                              <video
+                                controls
+                                preload="metadata"
+                                muted
+                                playsInline
+                                className="w-24 rounded bg-black"
+                                src={`${BACKEND_URL_LOCAL}${c.video_url}`}
+                                data-testid={`fuzz-video-${c.id}`}
+                              />
+                            ) : c.screenshot_url ? (
+                              <button
+                                type="button"
+                                onClick={() => setExpandedScreenshot(c.screenshot_url)}
+                                className="block w-24 h-14 rounded overflow-hidden border border-black/10 hover:opacity-80 transition-opacity"
+                                title="View screenshot"
+                                data-testid={`fuzz-screenshot-${c.id}`}
+                              >
+                                <img
+                                  src={`${BACKEND_URL_LOCAL}${c.screenshot_url}`}
+                                  alt=""
+                                  className="w-full h-full object-cover"
+                                />
+                              </button>
+                            ) : (
+                              <span className="text-[10px] text-[#86868B]">no evidence</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
+// ---------------- Architecture panel ----------------
+function ArchitecturePanel({ arch, runId }) {
+  const score = arch?.score || {};
+  // axes may be an array [{name,score,detail}] or a dict {name: score}
+  const axesRaw = score?.axes ?? {};
+  const axesList = Array.isArray(axesRaw)
+    ? axesRaw.map((a) => [a.name, a.score])
+    : Object.entries(axesRaw);
+  const suggestions = arch?.suggestions || [];
+  const peers = arch?.peer_comparison?.peers || [];
+  const nextMoves = arch?.peer_comparison?.next_3_moves || [];
+  const [busy, setBusy] = useState(null);
+
+  const applyOne = async (s) => {
+    if (!runId) return;
+    setBusy(s.id);
+    try {
+      const r = await applyPatch(runId, { kind: "architecture", suggestion_id: s.id });
+      toast.success(`PR #${r.data.number} opened`, {
+        description: r.data.url,
+        action: { label: "Open", onClick: () => window.open(r.data.url, "_blank") },
+      });
+    } catch (e) {
