@@ -96,3 +96,101 @@ async def _landmarks(page: Page) -> dict[str, Any]:
         }"""
     )
 
+
+async def _keyboard_tab_order(page: Page, max_tabs: int = 16) -> dict[str, Any]:
+    await page.keyboard.press("Home")
+    focused: list[str] = []
+    trapped = False
+    for i in range(max_tabs):
+        await page.keyboard.press("Tab")
+        await page.wait_for_timeout(40)
+        info = await page.evaluate(
+            """() => {
+              const el = document.activeElement;
+              if (!el || el === document.body) return { tag: 'body', label: '' };
+              const label = el.getAttribute('aria-label') || el.innerText || el.getAttribute('name') || el.id || el.tagName;
+              return { tag: el.tagName.toLowerCase(), label: String(label).trim().slice(0, 48) };
+            }"""
+        )
+        key = f"{info.get('tag')}:{info.get('label')}"
+        if key in focused and i > 3 and focused.count(key) >= 2:
+            trapped = True
+            break
+        focused.append(key)
+    interactive = [f for f in focused if not f.startswith("body:")]
+    return {
+        "tabs": len(focused),
+        "interactive_hits": len(interactive),
+        "trapped": trapped,
+        "sample": focused[:8],
+        "ok": len(interactive) >= 2 and not trapped,
+    }
+
+
+async def _touch_targets(page: Page) -> dict[str, Any]:
+    return await page.evaluate(
+        """() => {
+          const els = [...document.querySelectorAll('a[href], button, [role=button], input, select')];
+          const small = [];
+          for (const el of els) {
+            const r = el.getBoundingClientRect();
+            if (r.width < 4 || r.height < 4 || r.bottom < 0 || r.top > innerHeight) continue;
+            if (r.width < 24 || r.height < 24) {
+              small.push({
+                label: (el.innerText || el.getAttribute('aria-label') || el.tagName).trim().slice(0, 40),
+                w: Math.round(r.width), h: Math.round(r.height),
+              });
+            }
+            if (small.length >= 10) break;
+          }
+          return { small, ok: small.length === 0 };
+        }"""
+    )
+
+
+async def audit_page_a11y(page: Page, url: str) -> dict[str, Any]:
+    findings: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
+
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        await _settle(page)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "url": url,
+            "score": 40,
+            "checks": [],
+            "findings": [{"severity": "high", "title": "Page failed to load for a11y audit", "detail": str(exc)}],
+        }
+
+    contrast = await _contrast_sample(page)
+    aria = await _aria_names(page)
+    landmarks = await _landmarks(page)
+    keyboard = await _keyboard_tab_order(page)
+    targets = await _touch_targets(page)
+
+    def add_check(name: str, ok: bool, detail: str, severity: str = "medium") -> None:
+        checks.append({"name": name, "ok": ok, "detail": detail})
+        if not ok:
+            findings.append({
+                "id": f"a11y_{uuid.uuid4().hex[:8]}",
+                "category": "Accessibility",
+                "severity": severity,
+                "title": name,
+                "cause": detail,
+                "page_url": url,
+            })
+
+    fail_n = len(contrast.get("fails") or [])
+    add_check(
+        "Color contrast (sampled text)",
+        fail_n == 0,
+        f"{fail_n} low-contrast text samples (WCAG AA ~4.5:1)" if fail_n else f"Sampled {contrast.get('sampled', 0)} nodes — no AA failures detected",
+        "high" if fail_n >= 3 else "medium",
+    )
+    miss = aria.get("missing") or []
+    add_check(
+        "Accessible names on controls",
+        len(miss) == 0,
+        f"Unlabeled controls: {', '.join(miss)}" if miss else f"All sampled controls named ({aria.get('total', 0)})",
+        "high" if len(miss) >= 2 else "medium",
