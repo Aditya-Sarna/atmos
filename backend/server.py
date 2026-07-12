@@ -754,3 +754,97 @@ async def get_project(project_id: str, user: User = Depends(current_user)):
 
 class RunCreate(BaseModel):
     command: str = "/atmos test"
+    plan_id: Optional[str] = None
+    enable_dopamine_max: bool = False
+    design_theme_override: Optional[str] = None
+
+
+VALID_COMMANDS = {
+    "/atmos analyze", "/atmos explore", "/atmos test", "/atmos regress", "/atmos mobile",
+    "/atmos benchmark", "/atmos accessibility", "/atmos personas", "/atmos record", "/atmos report",
+}
+
+
+@api.post("/projects/{project_id}/runs")
+async def start_run(project_id: str, body: RunCreate, user: User = Depends(current_user)):
+    await ensure_org_for_user(db, user.user_id, user.email, user.name)
+    await require_permission(db, user.user_id, "runs:start")
+    q = await project_query_for_user(db, user.user_id)
+    q["project_id"] = project_id
+    proj = await db.projects.find_one(q, {"_id": 0})
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+    command = body.command.strip()
+    if command not in VALID_COMMANDS:
+        raise HTTPException(status_code=400, detail="Unknown command")
+
+    run_id = f"run_{uuid.uuid4().hex[:10]}"
+    plan_doc = None
+    if body.plan_id:
+        plan_doc = await db.test_plans.find_one(
+            {"plan_id": body.plan_id, "project_id": project_id, "user_id": user.user_id},
+            {"_id": 0},
+        )
+    run = TestRun(
+        run_id=run_id,
+        project_id=project_id,
+        user_id=user.user_id,
+        command=command,
+        status="running",
+    )
+    doc = run.model_dump()
+    doc["started_at"] = doc["started_at"].isoformat()
+    doc["plan_id"] = body.plan_id
+    doc["enable_dopamine_max"] = body.enable_dopamine_max
+    doc["design_theme_override"] = body.design_theme_override
+    await db.test_runs.insert_one(doc)
+
+    asyncio.create_task(_execute_run(
+        run_id, proj, command,
+        test_plan=plan_doc,
+        enable_dopamine_max=body.enable_dopamine_max,
+        design_theme_override=body.design_theme_override,
+    ))
+    return {"run_id": run_id}
+
+
+@api.get("/runs/{run_id}")
+async def get_run(run_id: str, user: User = Depends(current_user)):
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id}, {"_id": 0})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    proj = await db.projects.find_one({"project_id": run["project_id"]}, {"_id": 0})
+    events = await db.run_events.find({"run_id": run_id}, {"_id": 0}).sort("seq", 1).to_list(2000)
+    return {"run": run, "project": proj, "events": events}
+
+
+@api.get("/runs/{run_id}/stream")
+async def stream_run(run_id: str, request: Request):
+    # EventSource cannot set custom headers, so auth via cookie (or local bypass).
+    if _auth_bypass_enabled(request):
+        user_id = "user_local_dev"
+    else:
+        token = request.cookies.get("session_token")
+        if not token:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+        if not session:
+            raise HTTPException(status_code=401, detail="Invalid session")
+        user_id = session["user_id"]
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user_id}, {"_id": 0})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    async def event_gen() -> AsyncIterator[bytes]:
+        q = _subscribe(run_id)
+        try:
+            past = await db.run_events.find({"run_id": run_id}, {"_id": 0}).sort("seq", 1).to_list(2000)
+            for ev in past:
+                yield f"data: {json.dumps(ev)}\n\n".encode()
+
+            if run["status"] in ("completed", "failed"):
+                fresh = await db.test_runs.find_one({"run_id": run_id}, {"_id": 0})
+                yield f"event: done\ndata: {json.dumps({'status': fresh['status']})}\n\n".encode()
+                return
+
+            while True:
