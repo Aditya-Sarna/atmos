@@ -2446,3 +2446,97 @@ async def apply_patch_to_repo(run_id: str, body: ApplyPatchBody, user: User = De
         "branch": result["branch"],
         "applied_at": datetime.now(timezone.utc).isoformat(),
     })
+    return result
+
+
+# ----------------------------------------------------------------------------
+# RBAC — Team roles & permissions
+# ----------------------------------------------------------------------------
+
+
+class RolePermissionsUpdate(BaseModel):
+    permissions: list[str]
+
+
+class MemberInvite(BaseModel):
+    email: str
+    role: str = "viewer"
+
+
+class MemberRoleUpdate(BaseModel):
+    role: str
+
+
+@api.get("/team")
+async def get_team(user: User = Depends(current_user)):
+    await ensure_org_for_user(db, user.user_id, user.email, user.name)
+    member = await get_member(db, user.user_id)
+    if not member:
+        raise HTTPException(status_code=404, detail="No team")
+    org = await db.organizations.find_one({"org_id": member["org_id"]}, {"_id": 0})
+    members = await db.org_members.find({"org_id": member["org_id"]}, {"_id": 0}).to_list(100)
+    roles = await db.role_permissions.find({"org_id": member["org_id"]}, {"_id": 0}).to_list(20)
+    _, perms = await get_user_permissions(db, user.user_id)
+    return {
+        "org": org,
+        "members": members,
+        "roles": roles,
+        "permissions_catalog": ALL_PERMISSIONS,
+        "builtin_roles": BUILTIN_ROLES,
+        "your_role": member.get("role"),
+        "your_permissions": sorted(perms),
+    }
+
+
+@api.put("/team/roles/{role_id}")
+async def update_role_permissions(role_id: str, body: RolePermissionsUpdate, user: User = Depends(current_user)):
+    await require_permission(db, user.user_id, "roles:manage")
+    member = await get_member(db, user.user_id)
+    if role_id not in BUILTIN_ROLES:
+        raise HTTPException(status_code=400, detail="Unknown role")
+    perms = [p for p in body.permissions if p in {x["id"] for x in ALL_PERMISSIONS}]
+    if role_id == "admin" and "roles:manage" not in perms:
+        perms.append("roles:manage")
+    await db.role_permissions.update_one(
+        {"org_id": member["org_id"], "role_id": role_id},
+        {"$set": {
+            "permissions": sorted(set(perms)),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": user.user_id,
+        }},
+        upsert=True,
+    )
+    return {"ok": True, "role_id": role_id, "permissions": sorted(set(perms))}
+
+
+@api.post("/team/members")
+async def invite_member(body: MemberInvite, user: User = Depends(current_user)):
+    await require_permission(db, user.user_id, "members:write")
+    member = await get_member(db, user.user_id)
+    if body.role not in BUILTIN_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    existing_user = await db.users.find_one({"email": body.email.strip().lower()}, {"_id": 0})
+    invitee_id = existing_user["user_id"] if existing_user else f"pending_{uuid.uuid4().hex[:10]}"
+    await db.org_members.update_one(
+        {"org_id": member["org_id"], "email": body.email.strip().lower()},
+        {"$set": {
+            "org_id": member["org_id"],
+            "user_id": invitee_id,
+            "email": body.email.strip().lower(),
+            "role": body.role,
+            "joined_at": datetime.now(timezone.utc).isoformat(),
+            "invited_by": user.user_id,
+        }},
+        upsert=True,
+    )
+    return {"ok": True, "email": body.email, "role": body.role}
+
+
+@api.patch("/team/members/{target_user_id}")
+async def update_member_role(target_user_id: str, body: MemberRoleUpdate, user: User = Depends(current_user)):
+    await require_permission(db, user.user_id, "members:write")
+    member = await get_member(db, user.user_id)
+    if body.role not in BUILTIN_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    org = await db.organizations.find_one({"org_id": member["org_id"]}, {"_id": 0})
+    if target_user_id == org.get("owner_user_id") and body.role != "admin":
