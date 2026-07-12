@@ -378,3 +378,97 @@ def _verify_password(password: str, password_hash: str) -> bool:
     import bcrypt
     try:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _set_session_cookie(request: Request, response: Response, session_token: str) -> None:
+    cookie_secure_env = os.environ.get("ATMOS_COOKIE_SECURE", "auto").strip().lower()
+    host = (request.url.hostname or "").lower()
+    if cookie_secure_env in {"1", "true", "yes"}:
+        cookie_secure = True
+    elif cookie_secure_env in {"0", "false", "no"}:
+        cookie_secure = False
+    else:
+        cookie_secure = host not in {"localhost", "127.0.0.1"}
+    cookie_samesite = "none" if cookie_secure else "lax"
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        max_age=7 * 24 * 60 * 60,
+        httponly=True,
+        secure=cookie_secure,
+        samesite=cookie_samesite,
+        path="/",
+    )
+
+
+async def _create_session_for_user(
+    request: Request,
+    response: Response,
+    *,
+    user_id: str,
+    email: str,
+    name: str,
+    picture: Optional[str] = None,
+    session_token: Optional[str] = None,
+) -> dict[str, Any]:
+    token = session_token or f"sess_{uuid.uuid4().hex}"
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    await db.user_sessions.insert_one(
+        {
+            "user_id": user_id,
+            "session_token": token,
+            "expires_at": expires_at.isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    _set_session_cookie(request, response, token)
+    return {"user_id": user_id, "email": email, "name": name, "picture": picture}
+
+
+@api.post("/auth/register")
+async def auth_register(body: LocalAuthBody, request: Request, response: Response):
+    email = str(body.email).strip().lower()
+    if await db.users.find_one({"email": email}, {"_id": 1}):
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+    name = (body.name or email.split("@")[0]).strip() or "Atmos user"
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    await db.users.insert_one(
+        {
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "picture": None,
+            "password_hash": _hash_password(body.password),
+            "auth_provider": "local",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    await ensure_org_for_user(db, user_id, email, name)
+    return await _create_session_for_user(
+        request, response, user_id=user_id, email=email, name=name,
+    )
+
+
+@api.post("/auth/login")
+async def auth_login(body: LocalAuthBody, request: Request, response: Response):
+    email = str(body.email).strip().lower()
+    user_doc = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user_doc or not user_doc.get("password_hash"):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not _verify_password(body.password, user_doc["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    return await _create_session_for_user(
+        request,
+        response,
+        user_id=user_doc["user_id"],
+        email=user_doc["email"],
+        name=user_doc.get("name") or email.split("@")[0],
+        picture=user_doc.get("picture"),
+    )
+
+
+@api.post("/auth/session")
+async def auth_session(body: SessionExchangeBody, request: Request, response: Response):
+    data = await _exchange_session_id(body.session_id)
