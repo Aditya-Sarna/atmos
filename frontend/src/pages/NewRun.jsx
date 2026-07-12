@@ -147,3 +147,81 @@ export default function NewRun() {
               </div>
             ) : (
               <div>
+                <Label htmlFor="proj-gh" className="text-sm">GitHub repository URL</Label>
+                <Input
+                  id="proj-gh"
+                  value={githubUrl}
+                  onChange={(e) => setGithubUrl(e.target.value)}
+                  placeholder="https://github.com/owner/repo"
+                  disabled={!!existingProject}
+                  className="mt-2 h-12 rounded-xl font-mono text-sm"
+                  data-testid="project-github-input"
+                />
+              </div>
+            )}
+          </div>
+
+          {source === "github" && (
+            <div className="mt-5">
+              <Label htmlFor="proj-pat" className="text-sm">GitHub Personal Access Token <span className="text-[#86868B]">(optional for public clone, required to open PRs)</span></Label>
+              <Input
+                id="proj-pat"
+                type="password"
+                value={githubToken}
+                onChange={(e) => setGithubToken(e.target.value)}
+                placeholder={existingProject?.has_github_token ? "Saved token on file — enter a new token to replace it" : "ghp_…"}
+                autoComplete="new-password"
+                className="mt-2 h-12 rounded-xl font-mono text-sm"
+                data-testid="project-github-token"
+              />
+              <div className="mt-2 text-xs text-[#86868B]">
+                Scope: <span className="font-mono">repo</span>. Stored separately from the project record and never sent to the LLM. {existingProject?.has_github_token ? "Leave blank to keep the saved token." : "Without it, Atmos can clone public repos but can&apos;t apply PR fixes."}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-8">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-3">Command</div>
+            <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2" data-testid="commands-picker">
+              {commands.map((c) => {
+                const Icon = ICONS[c.cmd] || Activity;
+                const active = chosenCmd === c.cmd;
+                return (
+                  <button
+                    key={c.cmd}
+                    type="button"
+                    onClick={() => setChosenCmd(c.cmd)}
+                    className={`text-left rounded-2xl p-4 border transition active:scale-[0.98] ${active ? "border-[#0071E3] bg-white shadow-[0_8px_24px_rgba(0,113,227,0.12)]" : "border-black/10 bg-white hover:border-black/25"}`}
+                    data-testid={`cmd-${c.label.toLowerCase()}`}
+                  >
+                    <Icon className={`h-4 w-4 ${active ? "text-[#0071E3]" : "text-[#1D1D1F]"}`} strokeWidth={1.5} />
+                    <div className="mt-3 font-mono text-[11px] text-[#86868B]">{c.cmd}</div>
+                    <div className="font-display text-sm font-medium">{c.label}</div>
+                    <div className="mt-1 text-[11px] leading-snug text-[#1D1D1F]/60 line-clamp-2">{c.desc}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="mt-10 flex items-center justify-between gap-4">
+            <div className="text-sm text-[#86868B]">
+              {(commands.find((c) => c.cmd === chosenCmd)?.desc)
+                || (source === "github"
+                  ? "Atmos will clone, boot, crawl, fuzz, and score the architecture."
+                  : "Atmos will crawl, click buttons, fuzz forms, and score the UI.")}
+            </div>
+            <Button
+              onClick={submit}
+              disabled={busy || (source === "url" ? !url.trim() : !githubUrl.trim())}
+              className="rounded-full bg-[#0071E3] hover:bg-[#0077ED] text-white h-12 px-6 shrink-0"
+              data-testid="start-run-button"
+            >
+              {busy ? "Starting…" : <>Start run <ArrowRight className="ml-2 h-4 w-4" /></>}
+            </Button>
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
