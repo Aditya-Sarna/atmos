@@ -1,0 +1,42 @@
+# Craft Score merge gate — fail the PR if Atmos craft score is below threshold.
+#
+# Secrets:
+#   ATMOS_API_URL     e.g. https://api.your-atmos.com
+#   ATMOS_PROJECT_ID  project_id from Atmos dashboard
+#   ATMOS_CRAFT_TOKEN craft_api_token from project settings (rotate via PATCH settings)
+
+name: Atmos Craft Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+jobs:
+  craft-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate Craft Score gate
+        env:
+          ATMOS_API_URL: ${{ secrets.ATMOS_API_URL }}
+          ATMOS_PROJECT_ID: ${{ secrets.ATMOS_PROJECT_ID }}
+          ATMOS_CRAFT_TOKEN: ${{ secrets.ATMOS_CRAFT_TOKEN }}
+          THRESHOLD: "70"
+        run: |
+          set -euo pipefail
+          if [ -z "${ATMOS_API_URL:-}" ] || [ -z "${ATMOS_PROJECT_ID:-}" ] || [ -z "${ATMOS_CRAFT_TOKEN:-}" ]; then
+            echo "Missing ATMOS_API_URL / ATMOS_PROJECT_ID / ATMOS_CRAFT_TOKEN secrets"
+            exit 1
+          fi
+          URL="${ATMOS_API_URL%/}/api/projects/${ATMOS_PROJECT_ID}/craft/gate?threshold=${THRESHOLD}"
+          CODE=$(curl -sS -o /tmp/craft-gate.json -w "%{http_code}" \
+            -H "X-Atmos-Token: ${ATMOS_CRAFT_TOKEN}" \
+            "$URL" || true)
+          echo "HTTP $CODE"
+          cat /tmp/craft-gate.json
+          echo
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Atmos Craft Gate failed (HTTP $CODE). Fix craft regressions or lower threshold."
+            exit 1
+          fi
+          echo "Craft gate passed."
