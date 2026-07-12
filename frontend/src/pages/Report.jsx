@@ -589,3 +589,94 @@ function ArchitectureSection({ arch, runId }) {
                       disabled={busy === s.id || !!applied}
                       className="shrink-0 self-start rounded-full h-9 px-4 inline-flex items-center gap-1.5 bg-[#1D1D1F] text-white text-xs disabled:opacity-60"
                       data-testid={`arch-apply-${s.id}`}
+                      title="Open a PR with this change"
+                    >
+                      <CheckCircle2 className="h-4 w-4" strokeWidth={2} />
+                      {applied ? `PR #${applied.number}` : busy === s.id ? "Opening PR…" : "Apply via PR"}
+                    </button>
+                  </div>
+                  {s.code_snippet && (
+                    <details className="mt-3">
+                      <summary className="text-[11px] text-[#86868B] cursor-pointer select-none">
+                        View code reference{s.file_line ? ` (line ${s.file_line})` : ""}
+                      </summary>
+                      <pre className="mt-2 rounded-lg bg-[#1D1D1F] text-[#F5F5F7] text-[11px] p-3 overflow-x-auto whitespace-pre-wrap leading-relaxed font-mono">
+                        {s.code_snippet}
+                      </pre>
+                    </details>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {nextMoves.length > 0 && (
+        <div className="mt-4 card-elev p-6">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Next 3 moves</div>
+          <ol className="space-y-2 list-decimal pl-5 text-sm">
+            {nextMoves.map((m, i) => <li key={i}>{architectureText(m)}</li>)}
+          </ol>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------- Fuzz section ----------------
+function FuzzReportSection({ cases }) {
+  // counts
+  const counts = cases.reduce(
+    (acc, c) => { acc[c.status || "pending"] = (acc[c.status || "pending"] || 0) + 1; return acc; },
+    {}
+  );
+  // group by archetype
+  const groups = cases.reduce((m, c) => {
+    const k = c.field_archetype || "field";
+    if (!m[k]) m[k] = [];
+    m[k].push(c);
+    return m;
+  }, {});
+  const statusColor = { pass: "#34C759", fail: "#FF3B30", warn: "#FF9500", pending: "#86868B" };
+
+  return (
+    <div className="mt-10" data-testid="report-fuzz">
+      <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2 flex items-center gap-2">
+        <FlaskConical className="h-3.5 w-3.5" strokeWidth={1.75} /> Fuzz test results
+      </div>
+      <h2 className="font-display text-2xl md:text-3xl tracking-tight font-medium mb-5">
+        {cases.length} boundary inputs fired across your forms.
+      </h2>
+      <div className="card-elev p-4 flex flex-wrap gap-2 text-xs mb-4">
+        <span className="rounded-full bg-[#34C759]/10 text-[#1E8E3E] px-3 py-1">Passed {counts.pass || 0}</span>
+        <span className="rounded-full bg-[#FF3B30]/10 text-[#FF3B30] px-3 py-1">Failed {counts.fail || 0}</span>
+        <span className="rounded-full bg-[#FF9500]/10 text-[#B25E00] px-3 py-1">Warn {counts.warn || 0}</span>
+      </div>
+      <div className="space-y-3">
+        {Object.entries(groups).map(([arche, items]) => (
+          <div key={arche} className="card-elev p-4 md:p-5" data-testid={`report-fuzz-${arche}`}>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">{arche} · {items.length} cases</div>
+            <div className="rounded-lg overflow-hidden border border-black/5">
+              <table className="w-full text-xs">
+                <tbody>
+                  {items.map((c) => (
+                    <tr key={c.id} className="border-t border-black/5">
+                      <td className="px-3 py-2 align-top w-20">
+                        <span className="text-[10px] uppercase tracking-wider" style={{ color: statusColor[c.status] || "#86868B" }}>{c.status || "…"}</span>
+                      </td>
+                      <td className="px-3 py-2 align-top w-32 truncate">{c.field_label || c.field_name}</td>
+                      <td className="px-3 py-2 align-top w-1/3 font-mono break-all">{String(c.value ?? "").slice(0, 80) || <span className="text-[#86868B]">(empty)</span>}</td>
+                      <td className="px-3 py-2 align-top text-[#1D1D1F]/80">{c.expectation || c.label}</td>
+                      <td className="px-3 py-2 align-top text-[#86868B]">{c.actual || ""}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
