@@ -2258,3 +2258,97 @@ async def configure_swarm_test(run_id: str, config: SwarmConfigBody, user: User 
     # Store swarm configuration
     await db.test_runs.update_one(
         {"run_id": run_id},
+        {"$set": {"swarm_config": config.dict()}},
+    )
+    
+    return {"status": "configured", "config": config.dict()}
+
+
+@api.get("/runs/{run_id}/swarm/results")
+async def get_swarm_results(run_id: str, user: User = Depends(current_user)):
+    """Get swarm test results and metrics."""
+    run = await require_run_for_user(db, run_id, user.user_id, permission="runs:read")
+
+    # Collect swarm test events from database
+    events = await db.run_events.find(
+        {"run_id": run_id, "kind": {"$in": ["load_test_event", "swarm_metric"]}},
+        {"_id": 0}
+    ).to_list(None)
+
+    summary = run.get("swarm_summary", {})
+
+    return {
+        "test_id": run_id,
+        "status": summary.get("status", "pending"),
+        "events": events,
+        "summary": summary,
+    }
+
+
+@api.post("/runs/{run_id}/swarm/ship-report")
+async def generate_ship_report(run_id: str, user: User = Depends(current_user)):
+    """Generate business-focused Ship Report from swarm + audit results."""
+    from ship_report import ShipReportGenerator
+
+    run = await require_run_for_user(db, run_id, user.user_id, permission="runs:read")
+    
+    summary = run.get("summary", {})
+    swarm_summary = run.get("swarm_summary", {})
+    
+    # Extract relevant metrics
+    load_metrics = {
+        "success_rate": swarm_summary.get("success_rate", 0.0),
+        "error_rate": swarm_summary.get("error_rate", 0.0),
+        "latency_p95": swarm_summary.get("latency_p95_ms", 0.0),
+        "target_users": swarm_summary.get("target_users", 0),
+        "breaking_point_users": swarm_summary.get("breaking_point_users"),
+        "revenue_impact_dollars": swarm_summary.get("revenue_risk_per_hour", 0.0),
+    }
+    
+    accessibility_issues = [
+        i for i in summary.get("issues", [])
+        if i.get("category") == "Accessibility"
+    ]
+    
+    payment_test_results = swarm_summary.get("payment_results", {})
+    
+    # Generate report
+    generator = ShipReportGenerator(app_name=run.get("project_id", "Unknown"))
+    report = generator.generate_from_load_test(
+        load_metrics=load_metrics,
+        accessibility_issues=accessibility_issues,
+        payment_test_results=payment_test_results,
+    )
+    
+    return {
+        "readiness": report.readiness.value,
+        "confidence_score": report.confidence_score,
+        "executive_summary": report.executive_summary,
+        "can_users_use_it": report.can_users_use_it,
+        "can_disabled_users_use_it": report.can_disabled_users_use_it,
+        "can_handle_peak_users": report.can_handle_peak_users,
+        "are_payments_working": report.are_payments_working,
+        "checkout_abandonment_risk": report.checkout_abandonment_risk,
+        "top_3_issues": report.top_3_issues,
+        "launch_blockers": report.launch_blockers,
+        "recommendations": report.recommendations,
+        "metrics": {
+            "success_rate": report.success_rate,
+            "error_rate": report.error_rate,
+            "latency_p95_ms": report.latency_p95_ms,
+            "breaking_point_users": report.breaking_point_users,
+        },
+    }
+
+
+@api.post("/runs/{run_id}/apply")
+async def apply_patch_to_repo(run_id: str, body: ApplyPatchBody, user: User = Depends(current_user)):
+    run = await db.test_runs.find_one({"run_id": run_id, "user_id": user.user_id}, {"_id": 0})
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    summary = run.get("summary") or {}
+
+    proj = await db.projects.find_one({"project_id": run["project_id"]}, {"_id": 0})
+    if not proj or proj.get("source") != "github" or not proj.get("github_owner") or not proj.get("github_repo"):
+        raise HTTPException(status_code=400, detail="This run isn't connected to a GitHub repository. Add the repo when creating the project to enable Apply.")
+
