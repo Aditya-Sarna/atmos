@@ -1036,3 +1036,97 @@ def _github_test_cases(pages: list[dict[str, Any]], button_actions: list[dict[st
         "name": f"Responsive sweep — {len(pages)} routes on mobile and desktop",
         "category": "Visual",
         "steps": [f"Capture {p['url']} on iPhone SE" for p in pages[:6]] + ["Capture all on Desktop 1440"],
+        "expected_result": "pass" if all_ok else "warn",
+        "explanation": (
+            f"All {len(pages)} routes rendered successfully on both viewports." if all_ok
+            else f"Some routes failed to render on one or more viewports."
+        ),
+        "frames": [
+            p["captures"].get("Desktop 1440", {}).get("url_path")
+            for p in pages[:4] if p["captures"].get("Desktop 1440", {}).get("ok")
+        ],
+    })
+
+    # Strip None frames
+    for c in cases:
+        c["frames"] = [f for f in (c.get("frames") or []) if f]
+
+    return cases
+
+
+async def _execute_run(
+    run_id: str,
+    project: dict[str, Any],
+    command: str,
+    *,
+    test_plan: Optional[dict[str, Any]] = None,
+    enable_dopamine_max: bool = False,
+    design_theme_override: Optional[str] = None,
+) -> None:
+    """Real engine: optionally boot a GitHub repo → crawl + click buttons →
+    per-page LLM vision → patch & re-capture → fuzz form fields → architecture
+    analysis → executive report. Emits live JPEG frames the UI consumes as a stream."""
+    seq = {"n": 0}
+    app_type = project.get("app_type") or "generic"
+    source = project.get("source") or "url"
+    profile = get_command_profile(command)
+    a11y_result: dict[str, Any] = {"score": 0, "findings": [], "pages": []}
+    try:
+        await _emit(run_id, seq, "log", {"level": "info",
+            "message": f"Atmos {command} → {project['name']} ({app_type}) via {source} · profile: {profile.get('label')}"})
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            booted_url: Optional[str] = None
+            repo_root: Optional[Path] = None
+            repo_ctx = None
+
+            try:
+                # ── Phase 0: If GitHub source, clone + boot locally ──────
+                if source == "github" and project.get("github_url"):
+                    await _emit(run_id, seq, "phase", {"phase": "github_boot", "label": "Cloning & Booting Repo"})
+
+                    async def gh_log(level: str, message: str) -> None:
+                        await _emit(run_id, seq, "log", {"level": level, "message": message})
+
+                    secret = await db.project_secrets.find_one({"project_id": project["project_id"]}, {"_id": 0})
+                    pat = (secret or {}).get("github_token")
+                    repo_ctx = boot_repo(project["github_url"], on_log=gh_log, github_token=pat)
+                    booted_url, _stack, repo_root = await repo_ctx.__aenter__()
+                    target_url = booted_url
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Cloned repo → booted locally at {booted_url}"})
+                else:
+                    target_url = project["url"]
+
+                # ── Phase 1: Crawl + Capture every reachable page ───────
+                await _emit(run_id, seq, "phase", {"phase": "analyze", "label": "Project Understanding"})
+                await _emit(run_id, seq, "log", {"level": "info",
+                    "message": f"Launching headless Chromium against {target_url}…"})
+
+                async def on_progress(ev: dict[str, Any]):
+                    et = ev.get("type")
+                    if et == "page_capture":
+                        await _emit(run_id, seq, "page_capture", {
+                            "url": ev["url"],
+                            "viewport": ev["viewport"],
+                            "ok": ev["ok"],
+                            "url_path": ev["url_path"],
+                            "title": ev["title"],
+                            "page_index": ev["page_index"],
+                        })
+                        if ev["ok"]:
+                            await _emit(run_id, seq, "screenshot", {
+                                "action": "navigate", "target": ev["url"],
+                                "viewport": ev["viewport"],
+                                "caption": f"{ev['viewport']} · {ev['title'] or ev['url']}",
+                                "url_path": ev["url_path"],
+                            })
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"{'✓' if ev['ok'] else '✗'} {ev['viewport']} · {ev['url']}"})
+                    elif et == "live_frame":
+                        await _emit(run_id, seq, "live_frame", {
+                            "kind": ev.get("kind", "live"),
