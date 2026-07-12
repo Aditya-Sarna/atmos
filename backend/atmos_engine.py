@@ -1011,3 +1011,90 @@ async def capture_routes_direct(
                         except Exception:  # noqa: BLE001
                             break
                 
+                elapsed = time.time() - route_start_time
+                logger.debug("Route %s explored in %.1fs", route, elapsed)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Route %s failed: %s (after %.1fs)", route, exc, time.time() - route_start_time)
+    finally:
+        await discovery_page.close()
+        await discovery_ctx.close()
+
+    # ── 2) Full-page capture at all viewports ───────────────────────────
+    # Inject the collected auth state into fresh contexts so protected routes render.
+    contexts = []
+    for vp in VIEWPORTS:
+        ctx = await _new_context(browser, vp, record_video=True)
+        if _injected_auth:
+            # Open a blank page to inject localStorage before any navigation
+            init_page = await ctx.new_page()
+            try:
+                base_origin = base_url.rstrip("/")
+                await init_page.goto(base_origin, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                await init_page.evaluate(
+                    "(state) => { for (const [k,v] of Object.entries(state)) localStorage.setItem(k,v); }",
+                    _injected_auth,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                try:
+                    await init_page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        contexts.append((vp, ctx))
+
+    pages: list[dict[str, Any]] = []
+    seen_hashes: dict[str, str] = {}
+    try:
+        for idx, route in enumerate(routes[:MAX_PAGES]):
+            url = base_url + (route if route != "/" else "")
+            slug = route.strip("/").replace("/", "_") or "home"
+            page_slug = f"page{idx:02d}_{slug[:20]}"
+            page_entry: dict[str, Any] = {
+                "url": url,
+                "slug": page_slug,
+                "title": "",
+                "captures": {},
+                "route": route,
+            }
+            for vp, ctx in contexts:
+                cap = await _capture_full_page(ctx, url, vp["label"], run_id, page_slug, kind="baseline")
+                page_entry["captures"][vp["label"]] = cap
+                if cap.get("ok") and not page_entry["title"]:
+                    page_entry["title"] = cap.get("title") or route
+                if on_progress:
+                    try:
+                        await on_progress({
+                            "type": "page_capture",
+                            "url": url, "viewport": vp["label"],
+                            "ok": cap.get("ok"),
+                            "url_path": cap.get("url_path"),
+                            "title": cap.get("title", route),
+                            "page_slug": page_slug,
+                            "page_index": idx,
+                        })
+                        if cap.get("video_url"):
+                            await on_progress({
+                                "type": "route_video",
+                                "route": route,
+                                "url": url,
+                                "viewport": vp["label"],
+                                "video_url": cap.get("video_url"),
+                            })
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            # Verify visual distinctness using desktop hash.
+            desktop_hash = page_entry.get("captures", {}).get("Desktop 1440", {}).get("image_hash")
+            if desktop_hash:
+                if desktop_hash in seen_hashes and on_progress:
+                    try:
+                        await on_progress({
+                            "type": "duplicate_capture",
+                            "route": route,
+                            "url": url,
+                            "duplicate_of": seen_hashes[desktop_hash],
+                            "reason": "desktop screenshot hash matched a prior route",
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
