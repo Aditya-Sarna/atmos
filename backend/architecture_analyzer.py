@@ -525,3 +525,40 @@ async def llm_peer_comparison(project_name: str, archetype: str, scan: dict[str,
     )
 
     repo_root = Path(scan.get("repo_root", "."))
+    code_context_parts: list[str] = []
+    for f_info in scan.get("largest_files", [])[:5]:
+        rel = f_info["path"]
+        path = repo_root / rel
+        if path.exists() and path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".py"}:
+            snippet = _read_snippet(path, max_lines=30)
+            if snippet:
+                code_context_parts.append(f"### {rel} (first 30 lines)\n```\n{snippet}\n```")
+
+    for smell in scan.get("code_smells", [])[:3]:
+        code_context_parts.append(
+            f"### Code smell in {smell['file']}:{smell['line']}\n```\n{smell['snippet']}\n```"
+        )
+
+    code_context = "\n\n".join(code_context_parts) or "(no code samples available)"
+
+    prompt = (
+        f"Project: {project_name}\nArchetype: {archetype}\n"
+        f"Detected frameworks: {', '.join(scan['frameworks']) or 'unknown'}\n"
+        f"Languages: {scan['languages']}\nLayers detected: {scan['layers']}\n"
+        f"Has TS: {scan['has_typescript']} · tests: {scan['has_tests']} · state: {scan['has_state_layer']}\n"
+        f"Overall architecture score: {score['overall']}/100\n\n"
+        f"{peer_hint}\n\n"
+        f"Code samples from the repository:\n{code_context}\n\n"
+        "Based on the ACTUAL CODE above, compare to 3 well-known peer apps from the curated industry list. "
+        "Be specific about what you see in the code that is problematic and what concrete change to make. "
+        "JSON only — no prose, no markdown fences. Shape: "
+        "{ summary: string, peers: [{name, what_they_do_better, what_to_copy}], next_3_moves: [string,string,string] }"
+    )
+    try:
+        from user_llm_proxy import user_llm_json
+        data = await user_llm_json(
+            db,
+            user_id or "user_local_dev",
+            prompt,
+            system=(
+                "You are an enterprise software architect. Compare a submitted repo's architecture to "
