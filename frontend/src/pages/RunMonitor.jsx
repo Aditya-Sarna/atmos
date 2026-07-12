@@ -197,3 +197,102 @@ export default function RunMonitor() {
       const key = ev.screen_name || ev.screen_id || "Screen";
       if (!groups.has(key)) {
         groups.set(key, { name: key, purpose: ev.screen_purpose || "", route: ev.route, cases: [] });
+      }
+      const g = groups.get(key);
+      if (ev.screen_purpose && !g.purpose) g.purpose = ev.screen_purpose;
+      g.cases.push(ev);
+    }
+    return Array.from(groups.values());
+  }, [events]);
+
+  // Fuzz cases (start + end events keyed by id).
+  const fuzzCases = useMemo(() => {
+    const m = new Map();
+    for (const ev of events) {
+      if (ev.kind === "fuzz_case") {
+        const prev = m.get(ev.id) || {};
+        m.set(ev.id, { ...prev, ...ev });
+      }
+    }
+    return Array.from(m.values());
+  }, [events]);
+
+  // Architecture analysis snapshot (last one wins).
+  const architecture = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].kind === "architecture") return events[i];
+    }
+    return null;
+  }, [events]);
+
+  // Fold app_graph + page_capture events into a list of discovered pages.
+  const appPages = useMemo(() => {
+    // Start from the latest app_graph event (it has the canonical page list).
+    const graphEv = [...events].reverse().find((e) => e.kind === "app_graph");
+    const base = (graphEv?.pages || []).map((p) => ({
+      url: p.url, title: p.title, slug: p.slug, captures: {},
+    }));
+    const byUrl = new Map(base.map((p) => [p.url, p]));
+    for (const ev of events) {
+      if (ev.kind === "page_capture") {
+        let entry = byUrl.get(ev.url);
+        if (!entry) {
+          entry = { url: ev.url, title: ev.title || "", slug: `page${ev.page_index ?? byUrl.size}`, captures: {} };
+          byUrl.set(ev.url, entry);
+        }
+        entry.captures[ev.viewport] = { ok: ev.ok, url_path: ev.url_path };
+        if (ev.title && !entry.title) entry.title = ev.title;
+      }
+    }
+    return Array.from(byUrl.values());
+  }, [events]);
+
+  // Fold test_case + test_case_step events into a stateful map.
+  const { testCases, stepIndex, activeRunningId } = useMemo(() => {
+    const tcs = new Map();
+    const steps = {};
+    let active = null;
+    for (const ev of events) {
+      if (ev.kind === "test_case") {
+        const existing = tcs.get(ev.id) || {};
+        tcs.set(ev.id, { ...existing, ...ev });
+        if (ev.status === "running") active = ev.id;
+      } else if (ev.kind === "test_case_step") {
+        steps[ev.case_id] = ev.step_index;
+      }
+    }
+    return { testCases: Array.from(tcs.values()), stepIndex: steps, activeRunningId: active };
+  }, [events]);
+
+  const [activeTab, setActiveTab] = useState(() => searchParams.get("tab") || "live");
+
+  useEffect(() => {
+    const t = searchParams.get("tab");
+    if (t) setActiveTab(t);
+  }, [searchParams]);
+  const [selectedCaseId, setSelectedCaseId] = useState(null);
+  const [issuePageFilter, setIssuePageFilter] = useState(null);
+  const [testingToken, setTestingToken] = useState(false);
+  const [tokenTestResult, setTokenTestResult] = useState(null);
+
+  // Auto-switch focus: when test_cases phase begins, prefer that tab; auto-select the running case.
+  useEffect(() => {
+    if (testCases.length > 0 && activeTab === "live" && !done) {
+      setActiveTab("cases");
+    }
+  }, [testCases.length, activeTab, done]);
+  useEffect(() => {
+    if (activeRunningId) setSelectedCaseId(activeRunningId);
+    else if (!selectedCaseId && testCases.length > 0) setSelectedCaseId(testCases[0].id);
+  }, [activeRunningId, testCases, selectedCaseId]);
+
+  const selectedCase = testCases.find((tc) => tc.id === selectedCaseId);
+
+  const latestShot = screenshots[screenshots.length - 1];
+  const currentPhase = phases[phases.length - 1];
+
+  const progress = useMemo(() => {
+    const total = 13; // github_boot, analyze, explore, per_page, a11y, personas, issues, fuzz, screen_tests, architecture, test_cases, custom_tests, benchmark, report
+    const seen = new Set(phases.map((p) => p.phase));
+    return Math.min(100, Math.round((seen.size / total) * 100));
+  }, [phases]);
