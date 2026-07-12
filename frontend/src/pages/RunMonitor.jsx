@@ -296,3 +296,102 @@ export default function RunMonitor() {
     const seen = new Set(phases.map((p) => p.phase));
     return Math.min(100, Math.round((seen.size / total) * 100));
   }, [phases]);
+
+  if (!run) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <AtmosMark size={32} pulse />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F5F5F7]" data-testid="run-monitor-page">
+      <SiteHeader />
+      <main className="max-w-7xl mx-auto px-4 md:px-6 py-6 md:py-8 grid lg:grid-cols-12 gap-4 md:gap-6">
+        {/* HEADER ROW */}
+        <div className="lg:col-span-12 card-elev p-5 md:p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-3">
+              <Badge variant="outline" className="rounded-full font-mono text-[11px] border-black/15" data-testid="run-command-badge">
+                {run.command}
+              </Badge>
+              <div className="flex items-center gap-2 text-sm">
+                {done ? (
+                  run.status === "completed" ? (
+                    <><CheckCircle2 className="h-4 w-4 text-[#34C759]" /> <span>Completed</span></>
+                  ) : (
+                    <><AlertOctagon className="h-4 w-4 text-[#FF3B30]" /> <span>Failed</span></>
+                  )
+                ) : (
+                  <><span className="w-1.5 h-1.5 rounded-full bg-[#FF3B30] live-dot" /> <span>Live</span></>
+                )}
+              </div>
+            </div>
+            <h1 className="mt-3 font-display text-2xl md:text-3xl tracking-tight font-medium">
+              {project?.name}
+              <a href={project?.url} target="_blank" rel="noreferrer" className="ml-3 inline-block text-[#86868B] hover:text-[#0071E3]" data-testid="project-url-link">
+                <ArrowUpRight className="h-4 w-4 inline" />
+              </a>
+            </h1>
+            <div className="text-sm text-[#86868B] mt-1">{project?.url} · archetype: {project?.app_type}</div>
+          </div>
+
+          <div className="flex items-center gap-6">
+            <div className="text-right">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B]">Progress</div>
+              <div className="font-display text-3xl tabular-nums">{progress}%</div>
+            </div>
+            {done && summary && (
+              <Link to={`/runs/${runId}/report`}>
+                <Button className="rounded-full bg-[#1D1D1F] hover:bg-black text-white h-11 px-5" data-testid="view-report-button">
+                  View report <FileText className="ml-2 h-4 w-4" />
+                </Button>
+              </Link>
+            )}
+          </div>
+        </div>
+
+        {project?.source === "github" && (
+          <div className="lg:col-span-12 card-elev p-4 flex flex-col md:flex-row md:items-center justify-between gap-3" data-testid="github-pr-status">
+            <div className="flex items-start gap-3 text-sm text-[#1D1D1F]/80">
+              <Github className="h-4 w-4 mt-0.5 text-[#86868B]" />
+              <div>
+                <div className="font-medium text-[#1D1D1F]">
+                  {project?.has_github_token ? "GitHub PRs are enabled for this run." : "GitHub repo connected, but PRs are not enabled yet."}
+                </div>
+                <div className="text-[#86868B] mt-1">
+                  {project?.has_github_token
+                    ? "Apply via PR will use the stored project token. Use Test connection to verify it works before clicking Apply."
+                    : "Add a GitHub token from New Run to let Atmos open PRs for findings."}
+                </div>
+                {tokenTestResult && (
+                  <div
+                    className={`mt-2 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs ${
+                      tokenTestResult.ok ? "bg-[#E8F8EE] text-[#34C759]" : "bg-[#FFF1F1] text-[#FF3B30]"
+                    }`}
+                    data-testid="github-token-test-result"
+                  >
+                    {tokenTestResult.ok ? <CheckCircle2 className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
+                    {tokenTestResult.detail}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {project?.has_github_token && (
+                <Button
+                  variant="outline"
+                  className="rounded-full"
+                  data-testid="test-github-token-button"
+                  disabled={testingToken}
+                  onClick={async () => {
+                    setTestingToken(true);
+                    setTokenTestResult(null);
+                    try {
+                      const r = await (await import("@/lib/api")).testGithubToken(project.project_id);
+                      setTokenTestResult(r.data);
+                      if (r.data?.ok) toast.success("GitHub token is valid", { description: `Logged in as ${r.data.login}` });
+                      else toast.error("Token check failed", { description: r.data?.detail });
+                    } catch (e) {
+                      const detail = e?.response?.data?.detail || e.message;
