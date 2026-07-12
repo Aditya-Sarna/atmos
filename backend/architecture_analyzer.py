@@ -710,3 +710,40 @@ async def _url_mode_peer_comparison(
         "ecommerce": ["Shopify Storefront", "Amazon", "Allbirds", "Glossier"],
         "finance": ["Stripe Dashboard", "Plaid", "Wise", "Robinhood"],
         "fintech": ["Stripe Dashboard", "Plaid", "Wise", "Robinhood"],
+        "payments": ["Stripe Dashboard", "Razorpay", "Adyen", "Square"],
+        "saas": ["Linear", "Notion", "Vercel Dashboard", "Stripe Dashboard"],
+        "productivity": ["Notion", "Linear", "Height", "Coda"],
+        "dashboard": ["Linear", "Stripe Dashboard", "Vercel Dashboard", "Datadog"],
+        "landing": ["Apple.com", "Linear.app", "Stripe.com", "Vercel.com"],
+    }
+    arch_key = (archetype or "").lower().strip().replace(" ", "_")
+    suggested_peers = archetype_peers.get(arch_key) or archetype_peers.get(arch_key.split("_")[0], [])
+    peer_hint = (
+        f"Archetype '{archetype}' → curated industry peers: {', '.join(suggested_peers)}."
+        if suggested_peers else
+        "Pick 3 industry leaders in this archetype with overlapping features."
+    )
+    page_lines = [
+        f"- {p.get('route') or p.get('url')}: title='{(p.get('title') or '').strip()[:80]}', "
+        f"buttons={len(p.get('buttons') or [])}, inputs={len(p.get('inputs') or [])}"
+        for p in pages[:25]
+    ]
+    prompt = (
+        f"Project: {project_name}\nArchetype: {archetype}\n"
+        f"Runtime score: {score['overall']}/100 (axes: {score['axes']})\n\n"
+        f"Page map ({len(pages)} pages):\n" + "\n".join(page_lines) + "\n\n"
+        f"{peer_hint}\n\n"
+        "Based on this RUNTIME-OBSERVED map, compare to 3 well-known peer apps and propose the "
+        "next 3 concrete moves. JSON only — shape "
+        "{ summary, peers:[{name, what_they_do_better, what_to_copy}], next_3_moves:[string,string,string] }"
+    )
+    try:
+        from user_llm_proxy import user_llm_json
+        data = await user_llm_json(
+            db,
+            user_id or "user_local_dev",
+            prompt,
+            system=(
+                "You are an enterprise software architect reviewing a LIVE web app. Return ONLY JSON."
+            ),
+            purpose="arch_url_peer",
