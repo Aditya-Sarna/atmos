@@ -228,3 +228,90 @@ async def _fill_visible_forms(page: Page) -> int:
                 elif "subject" in hay:
                     value = DEFAULT_FORM_VALUES["subject"]
                 elif "message" in hay or "comment" in hay or "textarea" in hay:
+                    value = DEFAULT_FORM_VALUES["message"]
+                elif "company" in hay or "organization" in hay:
+                    value = DEFAULT_FORM_VALUES["company"]
+                elif "address" in hay or "street" in hay:
+                    value = DEFAULT_FORM_VALUES["address"]
+                elif "city" in hay:
+                    value = DEFAULT_FORM_VALUES["city"]
+                elif "zip" in hay or "postal" in hay:
+                    value = DEFAULT_FORM_VALUES["zip"]
+                else:
+                    value = DEFAULT_FORM_VALUES["name"]
+                await h.fill(value, timeout=1500)
+                filled += 1
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    return filled
+
+
+async def _extract_links(page: Page, start_url: str) -> list[str]:
+    try:
+        raw = await page.evaluate(
+            """() => {
+                const hrefs = new Set();
+                // Standard anchor links
+                document.querySelectorAll('a[href]').forEach(a => { if(a.href) hrefs.add(a.href); });
+                // Any element with a generic href attribute (SVG links, custom elements, etc.)
+                document.querySelectorAll('[href]').forEach(el => {
+                    const v = el.getAttribute('href');
+                    if (v && !v.startsWith('#') && !v.startsWith('mailto:') && !v.startsWith('tel:')) hrefs.add(el.href || v);
+                });
+                // data-href / data-path / data-url patterns used by some React Router wrappers
+                document.querySelectorAll('[data-href],[data-path],[data-url]').forEach(el => {
+                    const v = el.dataset.href || el.dataset.path || el.dataset.url;
+                    if (v) hrefs.add(v);
+                });
+                // React Router NavLink active items often have 'to' preserved in dataset
+                document.querySelectorAll('[data-to]').forEach(el => { if(el.dataset.to) hrefs.add(el.dataset.to); });
+                return Array.from(hrefs);
+            }"""
+        )
+    except Exception:  # noqa: BLE001
+        raw = []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for href in raw:
+        if not href:
+            continue
+        if href.startswith(("mailto:", "tel:", "javascript:")):
+            continue
+        # ignore obvious file downloads
+        if re.search(r"\.(pdf|zip|tar|gz|rar|exe|dmg|pkg)(\?|$)", href, re.I):
+            continue
+        try:
+            absolute = urljoin(start_url, href)
+            absolute = _normalize(absolute)
+        except Exception:  # noqa: BLE001
+            continue
+        if not _same_origin(start_url, absolute):
+            continue
+        if absolute == _normalize(start_url):
+            continue
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        cleaned.append(absolute)
+        if len(cleaned) >= MAX_LINKS_PER_PAGE:
+            break
+    return cleaned
+
+
+async def _enumerate_buttons(page: Page) -> list[dict[str, Any]]:
+    """Return [{text, type, rect, isIcon}] for every visible interactive element.
+
+    Captures BOTH text-labelled controls AND icon-only elements (SVG icons,
+    aria-label-only buttons, elements with title attribute but no inner text).
+    """
+    try:
+        raw = await page.evaluate(
+            """() => {
+                const out = [];
+                const seen = new Set();
+                const SELECTORS = [
+                    'button', '[role="button"]', '[role="menuitem"]', '[role="tab"]',
+                    'input[type="button"]', 'input[type="submit"]',
+                    'a[href]', '[role="link"]',
