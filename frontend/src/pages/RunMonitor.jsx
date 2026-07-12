@@ -494,3 +494,102 @@ export default function RunMonitor() {
                     <img
                       src={`data:image/jpeg;base64,${latestFrame.image_b64}`}
                       alt={latestFrame.label}
+                      className="w-full block"
+                      data-testid="live-stream-frame"
+                    />
+                  </div>
+                  <div className="text-[10px] text-[#86868B] mt-2">
+                    {liveFrames.length} frames received · {done ? "stream ended" : "streaming"}
+                  </div>
+                </div>
+              )}
+              <div className="card-elev p-4 md:p-5" data-testid="cinematic-panel">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2 text-xs text-[#86868B] uppercase tracking-[0.2em]">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#FF3B30] live-dot" />
+                    Cinematic capture · your app
+                  </div>
+                  {currentPhase && (
+                    <div className="text-xs text-[#86868B]">{currentPhase.label}</div>
+                  )}
+                </div>
+                {latestShot?.url_path ? (
+                  <RealShot
+                    urlPath={latestShot.url_path}
+                    label={`${latestShot.viewport} · ${project?.url}`}
+                    badge="captured"
+                    testid="cinematic-real-shot"
+                  />
+                ) : (
+                  <MockBrowser
+                    url={project?.url}
+                    action={latestShot?.action}
+                    target={latestShot?.target}
+                    viewport={latestShot?.viewport}
+                  />
+                )}
+                {screenshots.length > 0 && (
+                  <div className="mt-4 grid grid-cols-4 gap-2">
+                    {screenshots.slice(-4).map((s) => (
+                      s.url_path ? (
+                        <RealShot
+                          key={s.seq}
+                          urlPath={s.url_path}
+                          label={s.viewport}
+                          aspect="4/3"
+                        />
+                      ) : (
+                        <div key={s.seq} className="rounded-md aspect-video bg-gradient-to-br from-[#F5F5F7] to-white border border-black/5 relative overflow-hidden">
+                          <div className="absolute inset-0 dot-grid opacity-50" />
+                          <div className="absolute bottom-1 left-1 right-1 text-[9px] font-mono text-[#1D1D1F]/70 truncate">{s.action} {s.target}</div>
+                        </div>
+                      )
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {routeVideos.length > 0 && (
+                <div className="card-elev p-4 md:p-5" data-testid="route-video-panel">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2 text-xs text-[#86868B] uppercase tracking-[0.2em]">
+                      Route recordings
+                    </div>
+                    <div className="text-xs text-[#86868B]">{routeVideos.length} clips</div>
+                  </div>
+                  <div className="grid md:grid-cols-2 gap-3">
+                    {routeVideos.slice(-6).map((v, idx) => (
+                      <div key={`${v.seq || idx}-${v.route || idx}`} className="rounded-xl border border-black/10 p-2 bg-[#F5F5F7]">
+                        <div className="text-[11px] font-mono text-[#1D1D1F]/80 truncate mb-2">
+                          {v.route || v.url} · {v.viewport}
+                        </div>
+                        <video
+                          controls
+                          preload="metadata"
+                          className="w-full rounded-lg bg-black"
+                          src={`${BACKEND_URL}${v.video_url}`}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {screenTestGroups.length > 0 && (
+                <div className="card-elev p-4 md:p-5" data-testid="screen-tests-panel">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2 text-xs text-[#86868B] uppercase tracking-[0.2em]">
+                      Per-screen test cases
+                    </div>
+                    <div className="text-xs text-[#86868B]">
+                      {screensDiscovered.length} screens ·{" "}
+                      {screenTestGroups.reduce((n, g) => n + g.cases.length, 0)} cases
+                    </div>
+                  </div>
+                  <div className="space-y-5">
+                    {screenTestGroups.map((g, gi) => (
+                      <div key={`scrgrp-${gi}`} className="rounded-xl border border-black/10 p-3 bg-[#F5F5F7]">
+                        <div className="mb-2">
+                          <div className="text-sm font-semibold text-[#1D1D1F]">{g.name}</div>
+                          {g.purpose && (
+                            <div className="text-xs text-[#86868B] mt-0.5">{g.purpose}</div>
