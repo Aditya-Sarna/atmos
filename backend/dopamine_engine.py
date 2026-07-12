@@ -93,3 +93,98 @@ async def _audit_dark_patterns(page) -> list[dict[str, Any]]:
           const text = (document.body.innerText || '');
           const html = document.body.innerHTML || '';
           const lower = text.toLowerCase();
+          const findings = [];
+
+          function add(id, name, severity, evidence, recommendation, category) {
+            findings.push({ id, name, severity, evidence: String(evidence).slice(0, 160), recommendation, category });
+          }
+
+          // Fake urgency / scarcity
+          const urgencyRe = /only\\s+\\d+\\s+left|hurry|expires? in|limited time|selling fast|people (are )?viewing|in your cart|offer ends|last chance|act now|almost gone/i;
+          if (urgencyRe.test(text)) {
+            const m = text.match(urgencyRe);
+            add('fake_urgency', 'Fake urgency / scarcity', 'high',
+              m ? m[0] : 'urgency language',
+              'Remove fabricated countdown/scarcity unless inventory is verified in real time.',
+              'urgency');
+          }
+          if (document.querySelector('[class*="countdown"], [class*="timer"], [data-countdown]')) {
+            add('countdown_timer', 'Countdown / expiry timer', 'medium',
+              'countdown/timer element in DOM',
+              'Ensure timers reflect real offer expiry; never reset on refresh to manufacture pressure.',
+              'urgency');
+          }
+
+          // Confirmshaming
+          const shameRe = /no[, ]? (thanks|i (don.?t|do not) want|i.?ll (pass|skip)|i prefer to (pay|miss)|not interested).*?(miss|lose|poor|dumb|ugly|hate)/i;
+          const shameBtns = [...document.querySelectorAll('a, button, [role=button], label')].filter(el => {
+            const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+            return /no[, ]thanks|i.?ll pass|skip (this )?offer|not now|maybe later/i.test(t)
+              && /miss|lose|don.?t want|prefer to (stay|pay|miss)/i.test(t + ' ' + (el.parentElement?.innerText || '').slice(0, 200));
+          });
+          if (shameRe.test(text) || shameBtns.length) {
+            add('confirmshaming', 'Confirmshaming', 'high',
+              shameBtns[0]?.innerText?.trim()?.slice(0, 80) || 'shaming decline copy',
+              'Decline paths should be neutral ("No thanks") — not guilt or insult.',
+              'confirmshaming');
+          }
+
+          // Pre-checked marketing / upsell
+          const checkedExtras = [...document.querySelectorAll('input[type=checkbox]')].filter(c => {
+            if (!c.checked) return false;
+            const label = (c.labels && c.labels[0] ? c.labels[0].innerText : '')
+              + ' ' + (c.getAttribute('name') || '') + ' ' + (c.getAttribute('aria-label') || '');
+            return /newsletter|marketing|upsell|add.?on|insurance|warranty|donate|share|sms|promo/i.test(label);
+          });
+          if (checkedExtras.length) {
+            add('prechecked_optin', 'Pre-checked opt-in / upsell', 'high',
+              checkedExtras[0].name || checkedExtras[0].getAttribute('aria-label') || 'checked box',
+              'Marketing and paid add-ons must be opt-in unchecked by default (GDPR / FTC).',
+              'forced_action');
+          }
+
+          // Hidden costs language
+          if (/\\+\\s*(tax|fees|shipping)|taxes?\\s+(and|&)\\s+fees|additional fees|excl\\.?\\s*VAT|price may vary/i.test(text)
+              && /checkout|cart|total|pay/i.test(text)) {
+            add('hidden_costs', 'Possible hidden costs reveal', 'high',
+              'tax/fee language near checkout',
+              'Show all-in price before payment CTA; never surprise fees on the last step.',
+              'hidden_costs');
+          }
+
+          // Misdirection — visually dominant distractor vs primary
+          const buttons = [...document.querySelectorAll('button, [role=button], a.btn, input[type=submit]')];
+          const primaryLooking = buttons.filter(b => {
+            const s = getComputedStyle(b);
+            const bg = s.backgroundColor;
+            return /rgb\\(0,\\s*113,\\s*227\\)|rgb\\(0,\\s*122,\\s*255\\)|#0071e3|#0a84ff|rgb\\(34,\\s*197,\\s*94\\)/i.test(bg)
+              || /primary|cta/i.test(b.className);
+          });
+          const declineLooking = buttons.filter(b => /no thanks|skip|cancel|not now|decline/i.test(b.innerText || ''));
+          if (primaryLooking.length && declineLooking.length) {
+            const d = declineLooking[0];
+            const ds = getComputedStyle(d);
+            if (parseFloat(ds.opacity) < 0.55 || ds.visibility === 'hidden' || ds.fontSize.replace('px','') < 11) {
+              add('misdirection', 'Misdirection on decline path', 'medium',
+                (d.innerText || '').slice(0, 60),
+                'Keep accept and decline equally legible; do not hide the exit.',
+                'misdirection');
+            }
+          }
+
+          // Bait and switch / disguised ads
+          if (/sponsored|ad choice|advertisement/i.test(text) === false) {
+            const adish = [...document.querySelectorAll('a, button')].filter(el =>
+              /download now|install|claim (your )?prize|you.?ve won|free gift/i.test(el.innerText || '')
+            );
+            if (adish.length) {
+              add('disguised_ad', 'Possible disguised ad / bait CTA', 'medium',
+                (adish[0].innerText || '').slice(0, 60),
+                'Label ads clearly; never style promotions as system UI.',
+                'disguised_ads');
+            }
+          }
+
+          // Roach motel — easy signup language, hard cancel
+          if (/sign up in seconds|instant (access|account)|one.?click (signup|join)/i.test(text)
+              && !/cancel (anytime|easily)|unsubscribe|manage subscription/i.test(text)) {
