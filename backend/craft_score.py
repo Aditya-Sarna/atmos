@@ -188,3 +188,100 @@ def compare_to_baseline(current: dict[str, Any], baseline: Optional[dict[str, An
         "regressions": regressions,
         "improvements": improvements,
         "regressed": delta <= -3 or len(regressions) > 0,
+    }
+
+
+def evaluate_gate(
+    craft: dict[str, Any],
+    *,
+    threshold: int = DEFAULT_GATE_THRESHOLD,
+    baseline_comparison: Optional[dict[str, Any]] = None,
+    fail_on_regression: bool = True,
+) -> dict[str, Any]:
+    overall = int(craft.get("overall") or 0)
+    pass_threshold = overall >= int(threshold)
+    regressed = bool(baseline_comparison and baseline_comparison.get("regressed"))
+    passed = pass_threshold and not (fail_on_regression and regressed and overall < threshold + 5)
+    reasons = []
+    if not pass_threshold:
+        reasons.append(f"Craft score {overall} below gate threshold {threshold}")
+    if fail_on_regression and regressed:
+        reasons.append(
+            f"Regressed vs baseline "
+            f"(Δ {baseline_comparison.get('delta')}; "
+            f"{len(baseline_comparison.get('regressions') or [])} component regression(s))"
+        )
+    if passed:
+        reasons.append(f"Craft score {overall} meets gate (≥{threshold})")
+    return {
+        "passed": passed,
+        "threshold": int(threshold),
+        "overall": overall,
+        "tier": craft.get("tier"),
+        "fail_on_regression": fail_on_regression,
+        "reasons": reasons,
+    }
+
+
+def attach_craft_to_summary(
+    summary: dict[str, Any],
+    *,
+    baseline_craft: Optional[dict[str, Any]] = None,
+    gate_threshold: int = DEFAULT_GATE_THRESHOLD,
+    run_id: Optional[str] = None,
+) -> dict[str, Any]:
+    counts = dict(summary.get("counts") or {})
+    # Count dark-pattern issues for craft penalty
+    dp_issues = sum(
+        1 for i in (summary.get("issues") or [])
+        if (i.get("category") or "").lower() in {"dark pattern", "dark_pattern"}
+    )
+    if dp_issues and "dark_pattern" not in counts:
+        counts["dark_pattern"] = dp_issues
+
+    craft = compute_craft_score(
+        scores=summary.get("scores") or {},
+        personas=summary.get("personas") or [],
+        design_theory=summary.get("design_theory") or {},
+        funnel=summary.get("funnel") or {},
+        competitive_diffs=summary.get("competitive_diffs") or [],
+        accessibility_audit=summary.get("accessibility_audit") or {},
+        issue_counts=counts,
+        dopamine=summary.get("dopamine") or {},
+    )
+    if run_id:
+        craft["run_id"] = run_id
+    comparison = compare_to_baseline(craft, baseline_craft)
+    gate = evaluate_gate(craft, threshold=gate_threshold, baseline_comparison=comparison)
+    summary["craft_score"] = craft
+    summary["craft_baseline"] = comparison
+    summary["craft_gate"] = gate
+    return summary
+
+
+def render_craft_markdown(project: dict[str, Any], summary: dict[str, Any]) -> str:
+    craft = summary.get("craft_score") or {}
+    gate = summary.get("craft_gate") or {}
+    base = summary.get("craft_baseline") or {}
+    lines = [
+        f"# Craft Score — {project.get('name', 'Project')}",
+        "",
+        f"**Overall: {craft.get('overall', '—')}/100** · tier `{craft.get('tier', '—')}` · gate `{'PASS' if gate.get('passed') else 'FAIL'}`",
+        "",
+        f"Threshold: {gate.get('threshold', DEFAULT_GATE_THRESHOLD)}",
+    ]
+    if base.get("has_baseline"):
+        delta = base.get("delta")
+        sign = "+" if (delta or 0) >= 0 else ""
+        lines.append(f"Baseline: {base.get('baseline_overall')} → Δ {sign}{delta} (run `{base.get('baseline_run_id')}`)")
+    lines += ["", "## Components", ""]
+    for k, v in (craft.get("components") or {}).items():
+        d = (base.get("component_deltas") or {}).get(k)
+        delta_s = f" (Δ {d:+d})" if d is not None else ""
+        lines.append(f"- **{k}**: {v if v is not None else '—'}{delta_s}")
+    if gate.get("reasons"):
+        lines += ["", "## Gate", ""]
+        for r in gate["reasons"]:
+            lines.append(f"- {r}")
+    lines += ["", f"_Craft Score v{CRAFT_VERSION}_", ""]
+    return "\n".join(lines)
