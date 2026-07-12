@@ -280,3 +280,98 @@ export default function ChaosLabPanel({ runId, projectId, pages = [] }) {
                   value={users}
                   onChange={(e) => setUsers(Number(e.target.value) || 10)}
                   className="mt-1 w-full h-10 rounded-xl border border-black/10 px-3"
+                  data-testid="chaos-users"
+                />
+              </div>
+              {mode === "crash" && (
+                <div>
+                  <label className="text-xs text-[#86868B]">Max until break</label>
+                  <input
+                    type="number"
+                    min={users}
+                    max={2000}
+                    value={maxUsers}
+                    onChange={(e) => setMaxUsers(Number(e.target.value) || 200)}
+                    className="mt-1 w-full h-10 rounded-xl border border-black/10 px-3"
+                    data-testid="chaos-max-users"
+                  />
+                </div>
+              )}
+            </div>
+            <label className="mt-4 flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={includePayments}
+                onChange={(e) => setIncludePayments(e.target.checked)}
+                data-testid="chaos-include-payments"
+              />
+              Probe payment fields (Stripe test cards)
+            </label>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          disabled={busy || (scope === "pages" && selected.length === 0)}
+          onClick={handleStart}
+          className="mt-6 rounded-full bg-[#1D1D1F] text-white h-12 px-6 text-sm inline-flex items-center gap-2 disabled:opacity-50"
+          data-testid="chaos-start"
+        >
+          {busy ? (
+            <><Activity className="h-4 w-4 animate-pulse" /> Streaming…</>
+          ) : mode === "crash" ? (
+            <><Zap className="h-4 w-4" /> Crash test to breaking point</>
+          ) : (
+            <><Zap className="h-4 w-4" /> Launch {users} concurrent users</>
+          )}
+        </button>
+      </div>
+
+      {(liveNodes.length > 0 || summary?.architecture?.nodes) && (
+        <ArchitectureDiagram
+          nodes={liveNodes.length ? liveNodes : summary.architecture.nodes}
+          edges={liveEdges.length ? liveEdges : (summary?.architecture?.edges || [])}
+        />
+      )}
+
+      {summary && (
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3" data-testid="chaos-metrics">
+          <Metric
+            label="Success"
+            value={successPct != null ? `${successPct}%` : "—"}
+            sub={summary.thesis}
+          />
+          <Metric label="p95 latency" value={summary.latency_p95_ms != null ? `${Math.round(summary.latency_p95_ms)}ms` : "—"} />
+          <Metric
+            label="Breaking point"
+            value={summary.breaking_point_users ?? "—"}
+            sub={summary.break_reason || (summary.status === "running" ? "ramping…" : "held")}
+          />
+          <Metric
+            label="Payments"
+            value={summary.payment_summary?.attempts ?? summary.include_payments ? "on" : "off"}
+            sub={summary.payment_summary ? `${summary.payment_summary.fields_filled || 0} fields filled` : ""}
+          />
+        </div>
+      )}
+
+      {summary?.breaking_point_users && (
+        <div className="rounded-2xl border border-[#FF3B30]/30 bg-[#FFF5F5] p-4 flex gap-3" data-testid="chaos-break">
+          <AlertTriangle className="h-5 w-5 text-[#FF3B30] shrink-0" />
+          <div>
+            <div className="font-medium">System broke at {summary.breaking_point_users} users</div>
+            <div className="text-sm text-[#86868B] mt-1">{summary.break_reason}</div>
+          </div>
+        </div>
+      )}
+
+      {logs.length > 0 && (
+        <div className="rounded-2xl bg-[#1D1D1F] text-[#F5F5F7] p-4 font-mono text-[11px] max-h-40 overflow-auto" data-testid="chaos-log">
+          {logs.map((l, i) => (
+            <div key={i} className="opacity-80">{l.message || l.event}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
