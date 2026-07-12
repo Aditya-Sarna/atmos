@@ -747,3 +747,45 @@ async def _url_mode_peer_comparison(
                 "You are an enterprise software architect reviewing a LIVE web app. Return ONLY JSON."
             ),
             purpose="arch_url_peer",
+        )
+        return data if isinstance(data, dict) else {"peers": [], "summary": "", "next_3_moves": []}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("URL-mode peer comparison failed: %s", exc)
+        return {"peers": [], "summary": "", "next_3_moves": []}
+
+
+async def analyze_url_run(
+    pages: list[dict[str, Any]],
+    project_name: str,
+    archetype: str,
+    project_url: str,
+    db=None,
+    user_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Architecture audit for URL-source runs.
+
+    Uses runtime signals from the crawl (page count, interactive surface, depth,
+    a11y signals) plus an LLM peer comparison to produce a meaningful Architecture
+    tab even when there's no source code to scan.
+    """
+    score = _score_url_mode(pages)
+    suggestions = _deterministic_url_suggestions(pages, archetype)
+    peer = await _url_mode_peer_comparison(project_name, archetype, pages, score, db=db, user_id=user_id)
+    return {
+        "scan": {
+            "mode": "url",
+            "project_url": project_url,
+            "pages_observed": len(pages),
+            "routes": sorted({p.get("route") or p.get("url") for p in pages}),
+            "frameworks": [],
+            "languages": {},
+            "layers": [],
+            "has_typescript": False,
+            "has_tests": False,
+            "has_state_layer": False,
+        },
+        "score": score,
+        "suggestions": suggestions,
+        "peer_comparison": peer,
+        "mode": "url",
+    }
