@@ -378,3 +378,98 @@ async def _run_single_persona(
             if passed:
                 earned += rule["weight"]
             else:
+                color = "#FF3B30" if rule["weight"] >= 12 else "#FF9500"
+                msg = f"⚠ {persona['label']} would struggle here: {detail}"
+                await _show_annotation(page, persona["label"], msg, color)
+                shot_name = f"{run_id}_{slug}_{rule['id']}.png"
+                shot_path = SCREENSHOTS_DIR / shot_name
+                await page.screenshot(path=str(shot_path), full_page=False)
+                annotations.append({
+                    "rule_id": rule["id"],
+                    "message": msg,
+                    "screenshot_url": f"/api/screens/{shot_name}",
+                    "severity": "critical" if rule["weight"] >= 14 else "warning",
+                })
+                if on_progress:
+                    await on_progress({
+                        "type": "persona_annotation",
+                        "persona_id": pid,
+                        "rule_id": rule["id"],
+                        "message": msg,
+                        "screenshot_url": f"/api/screens/{shot_name}",
+                    })
+
+        await _hide_annotation(page)
+
+        # Persona-specific journey attempt
+        if persona["id"] == "elderly":
+            await page.wait_for_timeout(persona.get("typing_delay_ms", 400))
+            await _show_annotation(page, persona["label"], "Typing slowly — elderly users need 400ms+ between keystrokes", "#FF9500")
+            await page.wait_for_timeout(1200)
+        elif persona["id"] == "power_user":
+            await page.keyboard.press("Meta+k")
+            await page.wait_for_timeout(400)
+            await page.keyboard.press("Escape")
+
+        score = max(35, min(98, round(40 + (earned / max(total_weight, 1)) * 58)))
+
+        await page.close()
+        video_path = await page.video.path() if page.video else None
+        video_url = f"/api/screens/{video_name}" if video_path and Path(video_path).exists() else None
+
+        return {
+            "id": pid,
+            "label": persona["label"],
+            "focus": persona["focus"],
+            "score": score,
+            "citations": persona.get("citations", []),
+            "video_url": video_url,
+            "annotations": annotations,
+            "rule_results": rule_results,
+            "rules_passed": sum(1 for r in rule_results if r["passed"]),
+            "rules_total": len(rule_results),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("persona %s failed: %s", pid, exc)
+        try:
+            await page.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "id": pid,
+            "label": persona["label"],
+            "focus": persona["focus"],
+            "score": 50,
+            "video_url": None,
+            "annotations": [{"message": f"Simulation error: {exc}", "severity": "error"}],
+            "rule_results": [],
+            "rules_passed": 0,
+            "rules_total": len(persona.get("rules", [])),
+        }
+    finally:
+        await ctx.close()
+
+
+async def run_persona_simulations(
+    browser: Browser,
+    target_url: str,
+    run_id: str,
+    *,
+    on_progress: Optional[ProgressFn] = None,
+    persona_ids: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
+    """Run all (or selected) persona simulations with annotated video."""
+    selected = PERSONA_DEFINITIONS
+    if persona_ids:
+        selected = [p for p in PERSONA_DEFINITIONS if p["id"] in persona_ids]
+
+    results: list[dict[str, Any]] = []
+    for persona in selected:
+        if on_progress:
+            await on_progress({"type": "persona_start", "persona_id": persona["id"], "label": persona["label"]})
+        result = await _run_single_persona(browser, target_url, run_id, persona, on_progress)
+        results.append(result)
+        if on_progress:
+            await on_progress({"type": "persona_complete", **result})
+        await asyncio.sleep(0.2)
+    return results
