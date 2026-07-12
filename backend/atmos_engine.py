@@ -402,3 +402,90 @@ async def _click_button_by_text(page: Page, button: dict[str, Any] | str) -> boo
         x = rect.get("x")
         y = rect.get("y")
         w = rect.get("w")
+        h = rect.get("h")
+        if all(isinstance(v, (int, float)) for v in (x, y, w, h)):
+            try:
+                await page.mouse.click(x + w / 2, y + h / 2, delay=30)
+                return True
+            except Exception:  # noqa: BLE001
+                pass
+    return False
+
+
+_SELECTOR_RX = re.compile(r"([^{}@]+)\{", re.M)
+
+
+def _extract_selectors(css: str) -> list[str]:
+    """Pull every top-level selector list out of a CSS string. Skips at-rules."""
+    out: list[str] = []
+    for m in _SELECTOR_RX.finditer(css or ""):
+        chunk = m.group(1).strip()
+        if chunk.startswith("@") or not chunk:
+            continue
+        for sel in chunk.split(","):
+            sel = sel.strip()
+            if sel and not sel.startswith("@"):
+                out.append(sel)
+    return out
+
+
+async def _selectors_match_anything(page: Page, css: str) -> bool:
+    """Heuristic: did any of the CSS selectors actually match a DOM node?
+    If not, the patch is a visual no-op and we need a diagnostic overlay."""
+    selectors = _extract_selectors(css)
+    if not selectors:
+        return False
+    try:
+        return bool(await page.evaluate(
+            """(sels) => sels.some(s => {
+                try { return document.querySelector(s) != null; }
+                catch (_) { return false; }
+            })""",
+            selectors[:40],
+        ))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _inject_patch_css(page: Page, css: str, *, emphasize_interaction: bool = False) -> None:
+    """Inject a CSS patch and wait for layout/paint. Mirrors baseline page state first."""
+    css = (css or "").strip()
+    if not css:
+        return
+
+    try:
+        await page.add_style_tag(content=css)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("add_style_tag failed: %s", exc)
+
+    # Also inject via evaluate so patches survive strict CSP even if add_style_tag is ignored.
+    try:
+        await page.evaluate(
+            """(css) => {
+                let el = document.getElementById('atmos-patch-style');
+                if (!el) {
+                    el = document.createElement('style');
+                    el.id = 'atmos-patch-style';
+                    (document.head || document.documentElement).appendChild(el);
+                }
+                el.textContent = css;
+            }""",
+            css,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("evaluate style inject failed: %s", exc)
+
+    needs_focus = emphasize_interaction or bool(re.search(r":focus(-visible)?", css, re.I))
+    if needs_focus:
+        try:
+            await page.evaluate(
+                """() => {
+                    const pick = document.querySelector(
+                        'a[href], button, input:not([type=hidden]), textarea, select, [tabindex]:not([tabindex="-1"])'
+                    );
+                    if (pick) pick.focus();
+                }"""
+            )
+            await page.keyboard.press("Tab")
+        except Exception:  # noqa: BLE001
+            pass
