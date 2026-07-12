@@ -2540,3 +2540,97 @@ async def update_member_role(target_user_id: str, body: MemberRoleUpdate, user: 
         raise HTTPException(status_code=400, detail="Invalid role")
     org = await db.organizations.find_one({"org_id": member["org_id"]}, {"_id": 0})
     if target_user_id == org.get("owner_user_id") and body.role != "admin":
+        raise HTTPException(status_code=400, detail="Cannot demote org owner")
+    result = await db.org_members.update_one(
+        {"org_id": member["org_id"], "user_id": target_user_id},
+        {"$set": {"role": body.role}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Member not found")
+    return {"ok": True, "user_id": target_user_id, "role": body.role}
+
+
+@api.delete("/team/members/{target_user_id}")
+async def remove_member(target_user_id: str, user: User = Depends(current_user)):
+    await require_permission(db, user.user_id, "members:write")
+    member = await get_member(db, user.user_id)
+    org = await db.organizations.find_one({"org_id": member["org_id"]}, {"_id": 0})
+    if target_user_id == org.get("owner_user_id"):
+        raise HTTPException(status_code=400, detail="Cannot remove org owner")
+    await db.org_members.delete_one({"org_id": member["org_id"], "user_id": target_user_id})
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Custom test cases — user-written Playwright scripts
+# ----------------------------------------------------------------------------
+
+
+class TestStep(BaseModel):
+    action: str
+    selector: Optional[str] = None
+    text: Optional[str] = None
+    url: Optional[str] = None
+    value: Optional[str] = None
+    key: Optional[str] = None
+    ms: Optional[int] = None
+    description: Optional[str] = None
+    optional: bool = False
+
+
+class CustomTestCaseCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    steps: list[TestStep]
+    enabled: bool = True
+    viewport: str = "Desktop 1440"
+
+
+class CustomTestCaseUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    steps: Optional[list[TestStep]] = None
+    enabled: Optional[bool] = None
+    viewport: Optional[str] = None
+
+
+@api.get("/projects/{project_id}/test-cases")
+async def list_custom_test_cases(project_id: str, user: User = Depends(current_user)):
+    await require_permission(db, user.user_id, "test_cases:read")
+    q = await project_query_for_user(db, user.user_id)
+    q["project_id"] = project_id
+    if not await db.projects.find_one(q, {"_id": 0, "project_id": 1}):
+        raise HTTPException(status_code=404, detail="Project not found")
+    cases = await db.custom_test_cases.find({"project_id": project_id}, {"_id": 0}).to_list(100)
+    return {"cases": cases, "valid_actions": sorted(VALID_ACTIONS)}
+
+
+@api.post("/projects/{project_id}/test-cases")
+async def create_custom_test_case(project_id: str, body: CustomTestCaseCreate, user: User = Depends(current_user)):
+    await require_permission(db, user.user_id, "test_cases:write")
+    q = await project_query_for_user(db, user.user_id)
+    q["project_id"] = project_id
+    if not await db.projects.find_one(q, {"_id": 0, "project_id": 1}):
+        raise HTTPException(status_code=404, detail="Project not found")
+    for step in body.steps:
+        if step.action not in VALID_ACTIONS:
+            raise HTTPException(status_code=400, detail=f"Invalid action: {step.action}")
+    case_id = f"ctc_{uuid.uuid4().hex[:8]}"
+    doc = {
+        "case_id": case_id,
+        "project_id": project_id,
+        "user_id": user.user_id,
+        "name": body.name.strip(),
+        "description": body.description or "",
+        "steps": [s.model_dump() for s in body.steps],
+        "enabled": body.enabled,
+        "viewport": body.viewport,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.custom_test_cases.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.put("/projects/{project_id}/test-cases/{case_id}")
