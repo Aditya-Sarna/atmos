@@ -1018,3 +1018,110 @@ async def build_demand_report(
         await on_progress({"type": "demand_log", "message": f"Planning research keywords for {name} ({vertical})…"})
 
     plan = await plan_research_keywords(
+        project, blob=blob, vertical=vertical, db=db, user_id=user_id or project.get("user_id"),
+    )
+
+    if on_progress:
+        await on_progress({
+            "type": "demand_plan",
+            "message": f"Keyword plan ready ({plan.get('planner')}): {len(plan.get('keywords') or [])} queries",
+            "plan": plan,
+        })
+
+    if on_progress:
+        await on_progress({"type": "demand_log", "message": "Scraping Reddit posts + high-signal comments…"})
+    reddit = await scrape_reddit_research(plan)
+
+    if on_progress:
+        await on_progress({"type": "demand_log", "message": "Scraping GitHub issues (reactions-ranked)…"})
+    github = await scrape_github_research(plan, project)
+
+    if on_progress:
+        await on_progress({"type": "demand_log", "message": "Scraping Google Play + review search snippets…"})
+    play = await scrape_play_and_google(plan)
+
+    evidence = reddit + github + play
+    themes = _cluster_themes(evidence)
+
+    if on_progress:
+        await on_progress({"type": "demand_log", "message": "Orchestrating insight markdown briefs…"})
+
+    synthesis = await synthesize_research_markdown(
+        project=project,
+        plan=plan,
+        themes=themes,
+        evidence=evidence,
+        db=db,
+        user_id=user_id or project.get("user_id"),
+    )
+
+    artifact_index = _write_markdown_pack(run_id, name, plan, synthesis)
+
+    s_tier = [t for t in themes if t["tier"] == "S"]
+    a_tier = [t for t in themes if t["tier"] == "A"]
+    missing_high = [t for t in themes if t.get("likely_missing_from_your_app") and t["tier"] in ("S", "A")]
+
+    # Insight documents for API/UI (full markdown inline)
+    insight_docs = [
+        {"id": "plan", "title": "Research plan & keywords", "markdown": Path(artifact_index["files"]["research_plan"]).read_text(encoding="utf-8")},
+        {
+            "id": "archetypes",
+            "title": "Executive view & archetypes",
+            "markdown": (
+                f"### Executive summary\n\n{synthesis.get('executive_summary', '')}\n\n"
+                f"{synthesis.get('archetypes_md', '')}"
+            ).strip(),
+        },
+        {"id": "workflows", "title": "Builder workflows", "markdown": synthesis.get("workflows_md", "")},
+        {"id": "resources", "title": "Resources & format gaps", "markdown": synthesis.get("resources_and_gaps_md", "")},
+        {"id": "pain_points", "title": "Common pain points", "markdown": synthesis.get("pain_points_md", "")},
+        {"id": "design", "title": "Design decision patterns", "markdown": synthesis.get("design_decisions_md", "")},
+    ]
+
+    report = {
+        "report_id": f"demand_{uuid.uuid4().hex[:10]}",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "product": name,
+        "app_type": project.get("app_type") or vertical,
+        "vertical": vertical,
+        "competitors_watched": plan.get("competitors") or [],
+        "research_plan": plan,
+        "scrape_stats": {
+            "reddit_signals": len(reddit),
+            "github_signals": len(github),
+            "google_play_signals": len(play),
+            "total_raw_hits": len(evidence),
+            "total_weighted_mentions": sum(int(e.get("weight") or 1) for e in evidence),
+            "live_mentions": len(evidence),
+            "curated_fill_used": False,
+            "planner": plan.get("planner"),
+            "synthesizer": synthesis.get("synthesizer"),
+        },
+        "evidence_sample": [
+            {"snippet": e.get("snippet"), "source": e.get("source"), "url": e.get("url"), "weight": e.get("weight")}
+            for e in sorted(evidence, key=lambda x: -int(x.get("weight") or 1))[:12]
+        ],
+        "tier_list": themes,
+        "tier_summary": {
+            "S": [{"feature": t["label"], "mentions": t["mentions"], "score": t["demand_score"]} for t in s_tier],
+            "A": [{"feature": t["label"], "mentions": t["mentions"], "score": t["demand_score"]} for t in a_tier],
+            "B": [{"feature": t["label"], "mentions": t["mentions"], "score": t["demand_score"]} for t in themes if t["tier"] == "B"],
+            "C": [{"feature": t["label"], "mentions": t["mentions"], "score": t["demand_score"]} for t in themes if t["tier"] == "C"],
+        },
+        "top_gaps": missing_high[:8],
+        "executive_summary": synthesis.get("executive_summary"),
+        "insight_docs": insight_docs,
+        "proposed_features": artifact_index.get("proposed_features") or [],
+        "artifacts": artifact_index,
+        "methodology": (
+            "1) Plan vertical-specific research questions + keywords (LLM or domain pack). "
+            "2) Scrape Reddit (posts + comments), GitHub issues (reactions-ranked), Play/Google review snippets. "
+            "3) Cluster themes by classifiers + stems. "
+            "4) LLM-orchestrate detailed markdown memos and proposed-feature briefs to disk. "
+            "Tier = relative theme weight from live evidence only (no curated fill)."
+        ),
+    }
+
+    if on_progress:
+        await on_progress({"type": "demand_report", **report})
+    return report
