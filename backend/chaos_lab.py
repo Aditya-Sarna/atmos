@@ -295,3 +295,102 @@ async def _playwright_sample(
                         payment_ok += 1 if outcome == PaymentOutcome.SUCCESS else 0
                     except Exception:  # noqa: BLE001
                         pass
+        except Exception:  # noqa: BLE001
+            errors += 1
+        finally:
+            await ctx.close()
+
+    await asyncio.gather(*[user_journey(i) for i in range(users)])
+    total = ok + errors
+    return {
+        "ok": ok,
+        "errors": errors,
+        "total": total,
+        "success_rate": (ok / total) if total else 0.0,
+        "latency_p95_ms": _pct(latencies, 95),
+        "payment_attempts": payment_attempts,
+        "payment_filled": payment_ok,
+        "playwright_users": users,
+    }
+
+
+def _update_nodes_from_probe(
+    graph: dict[str, Any],
+    http_result: dict[str, Any],
+    pw_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    per_url = http_result.get("per_url") or {}
+    nodes = []
+    for n in graph.get("nodes") or []:
+        node = dict(n)
+        if node.get("kind") == "route" and node.get("url") in per_url:
+            stats = per_url[node["url"]]
+            req = max(1, stats.get("requests") or 0)
+            sr = stats.get("ok", 0) / req
+            p95 = stats.get("latency_p95_ms") or 0
+            node["requests"] = req
+            node["errors"] = stats.get("err", 0)
+            node["success_rate"] = round(sr, 3)
+            node["latency_p95_ms"] = round(p95, 1)
+            if sr < 0.5 or p95 > DEFAULT_BREAK_P95_MS * 1.5:
+                node["health"] = "broken"
+            elif sr < 0.85 or p95 > DEFAULT_BREAK_P95_MS:
+                node["health"] = "critical"
+            elif sr < 0.95 or p95 > 2000:
+                node["health"] = "degraded"
+            else:
+                node["health"] = "healthy"
+        elif node.get("kind") == "client":
+            sr = pw_result.get("success_rate", 1.0)
+            node["success_rate"] = round(sr, 3)
+            node["latency_p95_ms"] = round(pw_result.get("latency_p95_ms") or 0, 1)
+            node["health"] = "healthy" if sr >= 0.9 else "degraded" if sr >= 0.7 else "critical"
+        elif node.get("kind") == "payment":
+            attempts = pw_result.get("payment_attempts") or 0
+            if attempts:
+                node["requests"] = attempts
+                node["health"] = "healthy" if (pw_result.get("payment_filled") or 0) > 0 else "degraded"
+            else:
+                node["health"] = "idle"
+        elif node.get("kind") in {"api", "data", "edge"}:
+            # Infer from aggregate HTTP
+            sr = http_result.get("success_rate", 1.0)
+            p95 = http_result.get("latency_p95_ms") or 0
+            node["success_rate"] = round(sr, 3)
+            node["latency_p95_ms"] = round(p95, 1)
+            node["health"] = (
+                "broken" if sr < 0.5
+                else "critical" if sr < 0.85 or p95 > DEFAULT_BREAK_P95_MS
+                else "degraded" if sr < 0.95 or p95 > 2000
+                else "healthy"
+            )
+        nodes.append(node)
+    graph["nodes"] = nodes
+    return nodes
+
+
+def _stage_broken(
+    success_rate: float,
+    p95: float,
+    *,
+    break_success_rate: float,
+    break_p95_ms: float,
+) -> tuple[bool, Optional[str]]:
+    if success_rate < break_success_rate:
+        return True, f"success_rate {success_rate:.0%} < {break_success_rate:.0%}"
+    if p95 > break_p95_ms:
+        return True, f"p95 {p95:.0f}ms > {break_p95_ms:.0f}ms"
+    return False, None
+
+
+async def run_chaos_lab(
+    browser: Browser,
+    *,
+    base_url: str,
+    pages: Optional[list[str]] = None,
+    scope: str = "app",
+    mode: str = "fixed",  # fixed | crash
+    users: int = 50,
+    max_users: int = 500,
+    step_factor: float = 2.0,
+    hold_secs: float = 10.0,
