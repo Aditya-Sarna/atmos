@@ -1130,3 +1130,97 @@ async def _execute_run(
                     elif et == "live_frame":
                         await _emit(run_id, seq, "live_frame", {
                             "kind": ev.get("kind", "live"),
+                            "label": ev.get("label", ""),
+                            "image_b64": ev["image_b64"],
+                        })
+                    elif et == "route_context":
+                        await _emit(run_id, seq, "log", {
+                            "level": "info",
+                            "message": (
+                                f"Route {ev.get('route')} -> action={ev.get('action')} "
+                                f"filled={ev.get('filled_fields')} "
+                                f"cta={ev.get('clicked_cta') or 'none'} "
+                                f"sources={', '.join((ev.get('source_files') or [])[:2]) or 'n/a'}"
+                            ),
+                        })
+                    elif et == "route_video":
+                        await _emit(run_id, seq, "route_video", ev)
+                    elif et == "screen":
+                        await _emit(run_id, seq, "screen_discovered", ev)
+                        await _emit(run_id, seq, "log", {
+                            "level": "info",
+                            "message": (
+                                f"Screen '{ev.get('name')}' ({ev.get('route')}) — "
+                                f"{ev.get('field_count', 0)} input(s): "
+                                f"{', '.join((ev.get('fields') or [])[:4]) or 'none'}"
+                            ),
+                        })
+                    elif et == "screen_context":
+                        await _emit(run_id, seq, "log", {
+                            "level": "info",
+                            "message": (
+                                f"Testing '{ev.get('screen_name')}' — {ev.get('purpose') or 'screen'} "
+                                f"· {ev.get('planned_cases', 0)} test case(s)"
+                            ),
+                        })
+                    elif et == "screen_test":
+                        await _emit(run_id, seq, "screen_test", ev)
+                    elif et == "test_case":
+                        await _emit(run_id, seq, "test_case", ev)
+                    elif et == "test_case_step":
+                        await _emit(run_id, seq, "test_case_step", ev)
+                    elif et == "duplicate_capture":
+                        await _emit(run_id, seq, "log", {
+                            "level": "warning",
+                            "message": (
+                                f"Possible duplicate visual state for route {ev.get('route')} "
+                                f"(same as {ev.get('duplicate_of')})."
+                            ),
+                        })
+                    elif et == "fuzz_case":
+                        await _emit(run_id, seq, "fuzz_case", ev)
+
+                await _emit(run_id, seq, "phase", {"phase": "explore", "label": "Crawling & Clicking Buttons"})
+                flow_screens: list[dict[str, Any]] = []
+                # Always try agentic flow exploration first (for both live URLs and
+                # booted GitHub apps). Falling back to route/direct crawling only
+                # when too few distinct screens are discovered avoids "same first
+                # screen" captures on auth-gated SPAs.
+                explore_secs = int(profile.get("explore_max_secs") or max(30, EXPLORE_TIMEOUT_SECS - 10))
+                explore_secs = max(30, min(explore_secs, EXPLORE_TIMEOUT_SECS))
+                try:
+                    flow = await explore_app_flow(
+                        browser,
+                        target_url,
+                        run_id,
+                        on_progress=on_progress,
+                        max_duration_secs=explore_secs,
+                        db=db,
+                        user_id=project.get("user_id"),
+                    )
+                    flow_screens = flow.get("screens", [])
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("flow explorer failed: %s", exc)
+                    flow = {"screens": [], "pages": [], "button_actions": []}
+
+                if len(flow_screens) >= 2:
+                    crawl = {"pages": flow["pages"], "button_actions": flow.get("button_actions", [])}
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Flow explorer drove the app to {len(flow_screens)} distinct screen(s)."})
+                elif source == "github" and repo_root is not None:
+                    routes = extract_routes_from_source(repo_root)
+                    route_contexts = build_route_contexts(repo_root, routes)
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Flow explorer found {len(flow_screens)} screen(s). Falling back to {len(routes)} source routes."})
+                    crawl = await capture_routes_direct(
+                        browser,
+                        target_url,
+                        routes,
+                        run_id,
+                        route_contexts=route_contexts,
+                        on_progress=on_progress,
+                    )
+                else:
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": "Flow explorer found few screens; falling back to shallow crawl."})
+                    crawl = await crawl_and_capture(browser, target_url, run_id, on_progress=on_progress)
