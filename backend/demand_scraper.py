@@ -610,3 +610,105 @@ def _cluster_themes(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if r >= 0.50:
             return "A"
         if r >= 0.30:
+            return "B"
+        return "C"
+
+    out = []
+    for t in themes[:25]:
+        out.append({
+            "theme_id": t["theme_id"],
+            "feature_id": t["theme_id"],
+            "feature": t["label"],
+            "label": t["label"],
+            "mentions": t["count"],
+            "live_mentions": t["count"],
+            "demand_score": float(t["weight"]),
+            "tier": tier(t["weight"]),
+            "sources": dict(t["sources"]),
+            "examples": t["examples"],
+            "likely_missing_from_your_app": t["theme_id"].startswith("theme:") or t["theme_id"] in {
+                "docs_for_ai", "ai_features", "design_system", "onboarding", "accessibility",
+            },
+            "priority_action": "Deep-dive — strong live signal" if tier(t["weight"]) in ("S", "A") else "Monitor",
+        })
+    return out
+
+
+def _evidence_digest(evidence: list[dict[str, Any]], limit: int = 40) -> str:
+    ranked = sorted(evidence, key=lambda e: int(e.get("weight") or 1), reverse=True)
+    lines = []
+    for e in ranked[:limit]:
+        lines.append(
+            f"- [{e.get('source')}|w={e.get('weight')}] {e.get('snippet')}"
+            + (f" ({e.get('url')})" if e.get("url") else "")
+        )
+    return "\n".join(lines)
+
+
+# ── 4) LLM insight markdown orchestration ───────────────────────────────────
+
+
+SYNTHESIS_SYSTEM = """You are a principal product researcher writing internal research memos.
+Quality bar: structural insights, user/builder archetypes with approximate % among observed signals,
+workflow phases, design-decision patterns, resource format gaps, and numbered pain points.
+Ground claims in the provided evidence for THIS product's category only.
+Do not inject unrelated verticals (e.g. Bitcoin) unless the product is in that category.
+When citing percentages, say "among observed signals in this scrape".
+Never invent URLs. Markdown with clear headings. Output STRICT JSON."""
+
+
+async def synthesize_research_markdown(
+    *,
+    project: dict[str, Any],
+    plan: dict[str, Any],
+    themes: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+    db=None,
+    user_id: Optional[str] = None,
+) -> dict[str, Any]:
+    name = project.get("name") or "Product"
+    category = plan.get("category") or plan.get("vertical") or project.get("app_type") or "product"
+    digest = _evidence_digest(evidence, 45)
+    theme_lines = "\n".join(
+        f"- {t['tier']} | {t['label']} | weight={t['demand_score']} | sources={t['sources']}"
+        for t in themes[:15]
+    )
+
+    prompt = f"""Synthesize a research pack for {name} in category: {category}.
+
+Domain framing:
+{plan.get('domain_framing')}
+
+Research questions to answer:
+{json.dumps(plan.get('research_questions') or [], indent=2)}
+
+Peers: {plan.get('competitors')}
+Crawl context terms: {plan.get('context_terms')}
+
+Theme ranking from live scrape:
+{theme_lines}
+
+Evidence digest (weighted):
+{digest}
+
+Return JSON:
+{{
+  "executive_summary": "5-8 sentence structural overview for THIS category (not a feature laundry list)",
+  "archetypes_md": "markdown: user/builder archetypes relevant to THIS category with % of observed signals",
+  "workflows_md": "markdown: how people discover, evaluate, build, or operate in this category — phases",
+  "resources_and_gaps_md": "markdown: resources that exist vs format failures for this category",
+  "pain_points_md": "markdown: numbered pain points with evidence-backed detail for this product/category",
+  "design_decisions_md": "markdown: how design decisions get made in THIS ecosystem",
+  "proposed_features": [
+    {{
+      "slug": "kebab-case",
+      "title": "Feature name grounded in evidence",
+      "tier": "S|A|B",
+      "markdown": "LONG detailed markdown: Problem / Evidence / Who it serves / Proposed solution / Decision rules / Anti-patterns / Success metrics / Why now — all scoped to this product"
+    }}
+  ]
+}}
+
+Write 3-5 proposed_features. Extremely detailed briefs a PM could hand to eng.
+Stay inside {category}. Do not pad with unrelated vertical content.
+"""
