@@ -166,3 +166,87 @@ async def _compare_patterns(
                     '{"annotations":[{"pattern":"...","status":"present|missing|review","note":"..."}]}'
                 ),
             )
+            anns = (data or {}).get("annotations") or []
+            if anns:
+                out = []
+                for a in anns:
+                    st = (a.get("status") or "review").lower()
+                    if st not in {"present", "missing", "review"}:
+                        st = "review"
+                    out.append({
+                        "pattern": a.get("pattern") or "",
+                        "competitor": competitor["name"],
+                        "status": st,
+                        "note": a.get("note") or "",
+                    })
+                if out:
+                    return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("competitive LLM annotations failed: %s", exc)
+
+    annotations = []
+    for pat in patterns:
+        annotations.append({
+            "pattern": pat,
+            "competitor": competitor["name"],
+            "status": "review",
+            "note": f"{competitor['name']} uses this — compare against your {your_page_url or your_url}",
+        })
+    return annotations
+
+
+async def run_competitive_diffs(
+    browser: Browser,
+    your_url: str,
+    run_id: str,
+    app_type: str,
+    your_screenshot_url: Optional[str] = None,
+    *,
+    on_progress: Optional[ProgressFn] = None,
+    db=None,
+    user_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    competitors = COMPETITOR_PAGES.get(app_type, COMPETITOR_PAGES["generic"])
+    results: list[dict[str, Any]] = []
+
+    your_slug = _safe_name("yours_competitive")
+    if not your_screenshot_url:
+        your_screenshot_url = await _capture_page(browser, your_url, run_id, your_slug)
+
+    your_path = SCREENSHOTS_DIR / Path(your_screenshot_url or "").name if your_screenshot_url else None
+
+    for comp in competitors[:2]:
+        comp_slug = _safe_name(f"comp_{comp['name']}")
+        comp_url = await _capture_page(browser, comp["url"], run_id, comp_slug)
+        if not comp_url:
+            continue
+
+        side_by_side_url = None
+        if your_path and your_path.exists():
+            theirs_path = SCREENSHOTS_DIR / Path(comp_url).name
+            out_name = f"{run_id}_vs_{comp_slug}_sidebyside.png"
+            out_path = SCREENSHOTS_DIR / out_name
+            if theirs_path.exists() and _stitch_side_by_side(
+                your_path, theirs_path, out_path,
+                (f"Your app", f"{comp['name']} reference"),
+            ):
+                side_by_side_url = f"/api/screens/{out_name}"
+
+        annotations = await _compare_patterns(
+            your_url, comp, your_url, db=db, user_id=user_id,
+        )
+        row = {
+            "competitor": comp["name"],
+            "competitor_url": comp["url"],
+            "your_screenshot_url": your_screenshot_url,
+            "competitor_screenshot_url": comp_url,
+            "side_by_side_url": side_by_side_url,
+            "flow": comp.get("flow", "general"),
+            "pattern_annotations": annotations,
+            "patterns": comp.get("patterns", []),
+        }
+        results.append(row)
+        if on_progress:
+            await on_progress({"type": "competitive_diff", **row})
+
+    return results
