@@ -417,3 +417,89 @@ export default function Report() {
               {s.dopamine.verdict && (
                 <span className="text-base text-[#86868B] font-normal ml-2">· {s.dopamine.verdict}</span>
               )}
+            </h2>
+            <p className="text-sm text-[#86868B] mb-4">{s.dopamine.thesis_summary}</p>
+
+            {s.dopamine.dark_pattern_suggestions?.length > 0 && (
+              <div className="card-elev p-5 mb-4 border border-[#FF3B30]/20" data-testid="report-dark-suggestions">
+                <div className="rounded-xl bg-[#FFF5F5] border border-[#FF3B30]/15 p-3 mb-4 text-sm text-[#1D1D1F]/85">
+                  {s.dopamine.disclaimer || "DISCLAIMER: Missing dark-pattern suggestions are for awareness / ethics review only. Do not ship them."}
+                </div>
+                <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">
+                  Missing dark patterns — awareness only
+                </div>
+                <div className="space-y-3">
+                  {s.dopamine.dark_pattern_suggestions.slice(0, 8).map((d, i) => (
+                    <div key={d.id || i} className="border-b border-black/5 pb-3 last:border-0">
+                      <div className="font-medium text-sm">{d.name}</div>
+                      <div className="text-xs text-[#86868B] mt-0.5">missing · {d.category}</div>
+                      <p className="text-sm mt-1">{d.how}</p>
+                      <p className="text-xs text-[#FF3B30] mt-1">Risk: {d.risk}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {s.dopamine.dark_patterns?.length > 0 && (
+              <div className="card-elev p-5 mb-4">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Detected on page</div>
+                <div className="space-y-3">
+                  {s.dopamine.dark_patterns.slice(0, 10).map((d, i) => (
+                    <div key={d.id || i} className="border-b border-black/5 pb-3 last:border-0">
+                      <div className="font-medium text-sm">{d.name}</div>
+                      <div className="text-xs text-[#86868B] mt-0.5">{d.severity} · {d.category}</div>
+                      <p className="text-sm mt-1">{d.recommendation}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {s.dopamine.suggestions?.length > 0 && (
+              <div className="card-elev p-5">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Ethical engagement</div>
+                <ul className="list-disc pl-5 text-sm space-y-2">
+                  {s.dopamine.suggestions.slice(0, 8).map((sug, i) => (
+                    <li key={i}>{typeof sug === "string" ? sug : sug.title || sug.summary || JSON.stringify(sug)}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+
+        {s.command_profile?.label && (
+          <div className="mt-8 text-center text-xs text-[#86868B]">
+            Run profile: {s.command_profile.label} · phases { (s.command_profile.phases || []).join(", ") }
+          </div>
+        )}
+
+        <div className="mt-10 text-center text-sm text-[#86868B]">Atmos · Executive Report</div>
+      </main>
+    </div>
+  );
+}
+
+function ReportTestCases({ cases }) {
+  const [selectedId, setSelectedId] = useState(cases[0]?.id || null);
+  const selected = cases.find((c) => c.id === selectedId);
+  return (
+    <div className="grid md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-4">
+      <TestCaseList
+        cases={cases}
+        activeId={selectedId}
+        onSelect={setSelectedId}
+        currentSteps={Object.fromEntries(cases.map((c) => [c.id, (c.steps?.length || 1) - 1]))}
+      />
+      <TestCaseTheatre
+        testCase={selected}
+        currentStep={(selected?.steps?.length || 1) - 1}
+      />
+    </div>
+  );
+}
+
+// ---------------- Architecture section ----------------
+function ArchitectureSection({ arch, runId }) {
+  const score = arch?.score || {};
+  const axes = score?.axes || {};
