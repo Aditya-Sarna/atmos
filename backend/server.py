@@ -190,3 +190,97 @@ from tenant_guard import require_run_for_user, require_project_for_user
 configure_playwright_browsers()
 
 # ----------------------------------------------------------------------------
+# Mongo
+# ----------------------------------------------------------------------------
+
+_startup_warnings = validate_startup_env()
+mongo_url = os.environ["MONGO_URL"]
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ["DB_NAME"]]
+
+# ----------------------------------------------------------------------------
+# Logging / FastAPI
+# ----------------------------------------------------------------------------
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logger = logging.getLogger("atmos")
+
+# Hard stop for each fuzz sweep so one bad page cannot stall the whole run.
+FUZZ_URL_TIMEOUT_SECS = int(os.environ.get("ATMOS_FUZZ_URL_TIMEOUT_SECS", "45"))
+# Hard stop for flow exploration so auth-gated apps cannot stall the run.
+EXPLORE_TIMEOUT_SECS = int(os.environ.get("ATMOS_EXPLORE_TIMEOUT_SECS", "420"))
+
+app = FastAPI(title="Atmos")
+api = APIRouter(prefix="/api")
+app.add_middleware(RequestIdMiddleware)
+app.add_middleware(
+    SimpleRateLimitMiddleware,
+    limit=int(os.environ.get("ATMOS_RATE_LIMIT", "180")),
+    window=60.0,
+)
+
+# ----------------------------------------------------------------------------
+# Real-time pub/sub for SSE (per-run)
+# ----------------------------------------------------------------------------
+
+run_channels: dict[str, list[asyncio.Queue]] = {}
+
+
+def _subscribe(run_id: str) -> asyncio.Queue:
+    q: asyncio.Queue = asyncio.Queue()
+    run_channels.setdefault(run_id, []).append(q)
+    return q
+
+
+def _unsubscribe(run_id: str, q: asyncio.Queue) -> None:
+    subs = run_channels.get(run_id, [])
+    if q in subs:
+        subs.remove(q)
+    if not subs:
+        run_channels.pop(run_id, None)
+
+
+async def _publish(run_id: str, event: dict[str, Any]) -> None:
+    for q in list(run_channels.get(run_id, [])):
+        try:
+            q.put_nowait(event)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ----------------------------------------------------------------------------
+# Models
+# ----------------------------------------------------------------------------
+
+
+class User(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    picture: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class Project(BaseModel):
+    project_id: str
+    user_id: str
+    name: str
+    url: str
+    app_type: Optional[str] = None
+    source: str = "url"             # "url" | "github"
+    github_url: Optional[str] = None
+    github_owner: Optional[str] = None
+    github_repo: Optional[str] = None
+    has_github_token: bool = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TestRun(BaseModel):
+    run_id: str
+    project_id: str
+    user_id: str
+    command: str
+    status: str
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = None
+    summary: Optional[dict[str, Any]] = None
