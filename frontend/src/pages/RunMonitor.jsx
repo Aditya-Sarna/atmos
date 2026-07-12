@@ -791,3 +791,102 @@ export default function RunMonitor() {
                         <div>
                           <span className="text-[10px] uppercase tracking-[0.18em] text-[#86868B]">{c.role}</span>
                           <div className="font-medium mt-1 text-[#1D1D1F]/50 line-through decoration-black/20">{c.original}</div>
+                        </div>
+                        <span className="font-display tabular-nums text-lg" style={{ color: (c.score || 0) >= 75 ? "#34C759" : (c.score || 0) >= 55 ? "#FF9500" : "#FF3B30" }}>
+                          {c.score}
+                        </span>
+                      </div>
+                      {(c.issues || []).length > 0 && (
+                        <ul className="text-xs text-[#FF9500] space-y-0.5">
+                          {c.issues.map((iss, i) => <li key={i}>⚠ {iss}</li>)}
+                        </ul>
+                      )}
+                      <div className="grid sm:grid-cols-2 gap-2">
+                        {(c.alternatives || []).map((alt, i) => (
+                          <div key={i} className="rounded-xl border border-black/8 bg-[#F5F5F7] p-3">
+                            <div className="text-[10px] uppercase tracking-wider text-[#0071E3]">{alt.profile_label || alt.profile_id}</div>
+                            <div className="text-sm font-medium mt-1 leading-snug">{alt.text}</div>
+                            <p className="text-[11px] text-[#86868B] mt-1">{alt.rationale}</p>
+                            {alt.marketing_angle && (
+                              <span className="inline-block mt-2 text-[10px] px-2 py-0.5 rounded-full bg-white border border-black/5">{alt.marketing_angle}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </>
+              ) : (
+                <div className="card-elev p-10 text-center text-sm text-[#86868B]">
+                  Marketing copy alternatives appear after Atmos extracts headlines & CTAs from your live UI.
+                </div>
+              )}
+            </TabsContent>
+
+            {/* DEMAND INTELLIGENCE */}
+            <TabsContent value="demand" className="space-y-4 mt-4" data-testid="tab-demand-content">
+              {demandReport ? (
+                <>
+                  <div className="card-elev p-5 space-y-3">
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B]">Ecosystem demand research</div>
+                    <p className="text-sm leading-relaxed">{demandReport.executive_summary}</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                      {[
+                        ["Reddit", demandReport.scrape_stats?.reddit_signals],
+                        ["GitHub", demandReport.scrape_stats?.github_signals],
+                        ["Google/Play", demandReport.scrape_stats?.google_play_signals],
+                        ["Weighted", demandReport.scrape_stats?.total_weighted_mentions],
+                      ].map(([label, val]) => (
+                        <div key={label} className="rounded-xl bg-[#F5F5F7] p-3">
+                          <div className="font-display text-xl tabular-nums">{val ?? 0}</div>
+                          <div className="text-[10px] uppercase tracking-wider text-[#86868B]">{label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-[11px] text-[#86868B]">
+                      <span>Planner: {demandReport.scrape_stats?.planner || demandReport.research_plan?.planner || "—"}</span>
+                      <span>·</span>
+                      <span>Synthesizer: {demandReport.scrape_stats?.synthesizer || "—"}</span>
+                      <span>·</span>
+                      <span>Vertical: {demandReport.vertical || demandReport.app_type}</span>
+                    </div>
+                  </div>
+
+                  {(demandReport.research_plan?.keywords || []).length > 0 && (
+                    <div className="card-elev p-5">
+                      <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-2">Keyword research plan</div>
+                      <p className="text-sm text-[#1D1D1F]/80 mb-3">{demandReport.research_plan?.domain_framing}</p>
+                      {(demandReport.research_plan?.research_questions || []).length > 0 && (
+                        <ol className="list-decimal pl-5 text-sm space-y-1 mb-4">
+                          {demandReport.research_plan.research_questions.map((q, i) => (
+                            <li key={i}>{q}</li>
+                          ))}
+                        </ol>
+                      )}
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="text-left text-[10px] uppercase tracking-wider text-[#86868B] border-b border-black/10">
+                              <th className="py-2 pr-2">Query</th>
+                              <th className="py-2 pr-2">Intent</th>
+                              <th className="py-2">Why</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {demandReport.research_plan.keywords.map((k, i) => (
+                              <tr key={i} className="border-b border-black/5 align-top">
+                                <td className="py-2 pr-2 font-mono">{k.query}</td>
+                                <td className="py-2 pr-2 whitespace-nowrap">{k.intent}</td>
+                                <td className="py-2 text-[#86868B]">{k.why}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {(demandReport.insight_docs || []).filter((d) => d.id !== "plan").map((doc) => (
+                    <div key={doc.id} className="card-elev p-5">
+                      <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-2">{doc.title}</div>
+                      <MarkdownView markdown={doc.markdown} />
