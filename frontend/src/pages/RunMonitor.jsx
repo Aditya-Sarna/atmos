@@ -890,3 +890,102 @@ export default function RunMonitor() {
                     <div key={doc.id} className="card-elev p-5">
                       <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-2">{doc.title}</div>
                       <MarkdownView markdown={doc.markdown} />
+                    </div>
+                  ))}
+
+                  {(demandReport.proposed_features || []).length > 0 && (
+                    <div className="space-y-4">
+                      <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] px-1">Proposed feature briefs (.md)</div>
+                      {demandReport.proposed_features.map((f) => (
+                        <div key={f.slug} className="card-elev p-5">
+                          <div className="flex items-center justify-between gap-2 mb-2">
+                            <div className="font-display text-lg">{f.title}</div>
+                            <span className="text-[10px] uppercase tracking-wider font-medium" style={{ color: f.tier === "S" ? "#FF3B30" : "#FF9500" }}>
+                              Tier {f.tier}
+                            </span>
+                          </div>
+                          {f.url_path && (
+                            <a
+                              className="text-xs text-[#0071E3] hover:underline inline-flex items-center gap-1 mb-3"
+                              href={`${BACKEND_URL}${f.url_path}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Open .md <ArrowUpRight className="w-3 h-3" />
+                            </a>
+                          )}
+                          <MarkdownView markdown={f.markdown} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {(demandReport.evidence_sample || []).length > 0 && (
+                    <div className="card-elev p-5">
+                      <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Top evidence</div>
+                      <div className="space-y-3">
+                        {demandReport.evidence_sample.map((e, i) => (
+                          <div key={i} className="text-sm border-b border-black/5 pb-2">
+                            <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-[#86868B] mb-1">
+                              <span>{e.source}</span>
+                              <span>· w={e.weight}</span>
+                              {e.url && (
+                                <a href={e.url} target="_blank" rel="noreferrer" className="text-[#0071E3] normal-case tracking-normal">
+                                  source
+                                </a>
+                              )}
+                            </div>
+                            <p className="italic text-[#1D1D1F]/80">“{e.snippet}”</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="card-elev p-5">
+                    <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Theme tier list (S → C)</div>
+                    {["S", "A", "B", "C"].map((tier) => {
+                      const items = demandReport.tier_summary?.[tier] || [];
+                      if (!items.length) return null;
+                      const color = tier === "S" ? "#FF3B30" : tier === "A" ? "#FF9500" : tier === "B" ? "#0071E3" : "#86868B";
+                      return (
+                        <div key={tier} className="mb-4 last:mb-0">
+                          <div className="font-display text-lg mb-2" style={{ color }}>Tier {tier}</div>
+                          <div className="space-y-2">
+                            {items.map((it, i) => (
+                              <div key={i} className="flex items-center justify-between text-sm border-b border-black/5 pb-2">
+                                <span>{it.feature}</span>
+                                <span className="font-mono text-xs text-[#86868B]">{it.mentions} · score {it.score}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <p className="text-[11px] text-[#86868B] mt-3">{demandReport.methodology}</p>
+                  </div>
+                </>
+              ) : (
+                <div className="card-elev p-10 text-center text-sm text-[#86868B]">
+                  Demand research plans keywords first, then scrapes Reddit / GitHub / Play — insight .md briefs appear near end of run.
+                </div>
+              )}
+            </TabsContent>
+          </Tabs>
+        </section>
+
+        {/* RIGHT */}
+        <aside className="lg:col-span-4 space-y-4 md:space-y-6">
+          {/* Application graph */}
+          <AppGraph pages={appPages} onSelect={(url) => { setIssuePageFilter(url); setActiveTab("issues"); }} selectedUrl={issuePageFilter} />
+
+          {/* Phases */}
+          <div className="card-elev p-5">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-4">Phases</div>
+            <div className="space-y-2">
+              {["github_boot", "analyze", "explore", "per_page", "accessibility", "personas", "issues", "fuzz", "architecture", "benchmark", "copywriting", "demand", "report"].map((ph) => {
+                const reached = phases.some((p) => p.phase === ph);
+                const Icon = PHASE_ICONS[ph] || Activity;
+                return (
+                  <div
+                    key={ph}
