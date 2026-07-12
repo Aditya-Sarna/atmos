@@ -57,6 +57,13 @@ chainlit.md
 .chainlit
 .ipynb_checkpoints/
 .ac
+.tools/
+
+# Atmos runtime artifacts
+backend/screenshots/
+backend/videos/
+backend/reports/
+*.webm
 
 # Deployment
 .vercel
