@@ -315,3 +315,90 @@ async def _enumerate_buttons(page: Page) -> list[dict[str, Any]]:
                     'button', '[role="button"]', '[role="menuitem"]', '[role="tab"]',
                     'input[type="button"]', 'input[type="submit"]',
                     'a[href]', '[role="link"]',
+                    '[aria-label]', '[title]',
+                ];
+                const els = Array.from(new Set(
+                    SELECTORS.flatMap(s => Array.from(document.querySelectorAll(s)))
+                ));
+                for (const el of els) {
+                    const style = getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+                    if (!el.offsetParent && style.position !== 'fixed' && style.position !== 'absolute') continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 8 || r.height < 8) continue;
+                    // Text-labelled button
+                    const visibleText = (el.innerText || el.value || '').trim();
+                    const ariaLabel = (el.getAttribute('aria-label') || el.title || el.getAttribute('data-tooltip') || '').trim();
+                    const text = (visibleText || ariaLabel).slice(0, 80);
+                    const hasSvg = !!(el.querySelector('svg') || (el.tagName === 'svg'));
+                    const isIconOnly = (!visibleText || visibleText.length === 0) && (hasSvg || !!ariaLabel);
+                    if (!text && !isIconOnly) continue;
+                    const key = (text || `icon@${Math.round(r.x)},${Math.round(r.y)}`).toLowerCase();
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    out.push({
+                        text: text || '[icon]',
+                        type: el.tagName.toLowerCase(),
+                        rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+                        isIcon: isIconOnly,
+                    });
+                    if (out.length >= 60) break;
+                }
+                return out;
+            }"""
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    safe: list[dict[str, Any]] = []
+    for b in raw:
+        text = b.get("text", "")
+        if FORBIDDEN_CLICK_TEXT.search(text):
+            continue
+        safe.append(b)
+    return safe
+
+
+async def _click_button_by_text(page: Page, button: dict[str, Any] | str) -> bool:
+    """Click a discovered interactive control.
+
+    Prefer semantic locators when we have a text label, but fall back to a
+    coordinate click using the descriptor captured during enumeration. This is
+    more reliable for Framer Motion buttons and other custom controls whose
+    accessible name does not round-trip cleanly.
+    """
+    text = button if isinstance(button, str) else (button.get("text") or "")
+    try:
+        if text:
+            await page.get_by_role("button", name=text, exact=True).first.click(timeout=2000, no_wait_after=True)
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if text:
+            await page.get_by_role("tab", name=text, exact=True).first.click(timeout=2000, no_wait_after=True)
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if text:
+            await page.get_by_role("menuitem", name=text, exact=True).first.click(timeout=2000, no_wait_after=True)
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if text:
+            await page.get_by_role("link", name=text, exact=True).first.click(timeout=2000, no_wait_after=True)
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if text:
+            await page.get_by_text(text, exact=True).first.click(timeout=2000, no_wait_after=True)
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(button, dict):
+        rect = button.get("rect") or {}
+        x = rect.get("x")
+        y = rect.get("y")
+        w = rect.get("w")
