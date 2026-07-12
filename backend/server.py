@@ -2070,3 +2070,97 @@ async def start_chaos(run_id: str, body: ChaosStartBody, user: User = Depends(cu
                 patch = {"chaos_summary.live": payload}
                 if kind == "chaos_completed":
                     patch = {}
+                if patch:
+                    try:
+                        await db.test_runs.update_one({"run_id": run_id}, {"$set": patch})
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                )
+                try:
+                    summary = await run_chaos_lab(
+                        browser,
+                        base_url=project.get("url") or pages[0],
+                        pages=pages,
+                        scope=scope,
+                        mode=mode,
+                        users=users,
+                        max_users=max_users,
+                        step_factor=float(body.step_factor),
+                        hold_secs=hold,
+                        include_payments=bool(body.include_payments),
+                        payment_provider=body.payment_provider,
+                        break_success_rate=float(body.break_success_rate),
+                        break_p95_ms=float(body.break_p95_ms),
+                        ide_files=ide.get("files") or [],
+                        on_progress=on_progress,
+                    )
+                    await db.test_runs.update_one(
+                        {"run_id": run_id},
+                        {"$set": {
+                            "chaos_summary": summary,
+                            "swarm_summary": {
+                                **summary,
+                                "target_users": users,
+                                "success_rate": summary.get("success_rate"),
+                                "latency_p95_ms": summary.get("latency_p95_ms"),
+                                "breaking_point_users": summary.get("breaking_point_users"),
+                                "status": "completed",
+                            },
+                            "payment_summary": summary.get("payment_summary"),
+                        }},
+                    )
+                finally:
+                    await browser.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Chaos lab failed: %s", exc)
+            fail = {"status": "failed", "error": str(exc)[:400]}
+            await db.test_runs.update_one(
+                {"run_id": run_id},
+                {"$set": {"chaos_summary": fail, "swarm_summary": fail}},
+            )
+            await on_progress({"type": "chaos_failed", **fail})
+
+    asyncio.create_task(_go())
+    return {"ok": True, "run_id": run_id, "mode": mode, "scope": scope, "pages": pages}
+
+
+@api.get("/runs/{run_id}/chaos/live")
+async def get_chaos_live(run_id: str, user: User = Depends(current_user)):
+    run = await require_run_for_user(db, run_id, user.user_id, permission="runs:read")
+    events = await db.run_events.find(
+        {"run_id": run_id, "kind": "chaos_event"},
+        {"_id": 0},
+    ).sort("ts", -1).to_list(80)
+    return {
+        "summary": run.get("chaos_summary") or {},
+        "events": list(reversed(events)),
+    }
+
+
+@api.post("/runs/{run_id}/swarm/start")
+async def start_swarm(run_id: str, body: SwarmStartBody, user: User = Depends(current_user)):
+    """Legacy alias → Chaos Lab fixed mode."""
+    chaos = ChaosStartBody(
+        scope="app",
+        mode="crash" if body.profile == "ramp" else "fixed",
+        users=body.target_users,
+        max_users=max(body.target_users * 4, 200) if body.profile == "ramp" else body.target_users,
+        hold_secs=float(body.duration_secs),
+        include_payments=body.journey == "finance",
+    )
+    return await start_chaos(run_id, chaos, user)
+
+
+# ============================================================================
+# Payment sandbox — finance app testing (now routes into Chaos Lab)
+# ============================================================================
+
+
+class PaymentSimulateBody(BaseModel):
+    provider: str = "stripe"           # stripe | razorpay | paypal
