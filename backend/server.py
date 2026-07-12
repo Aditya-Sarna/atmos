@@ -2634,3 +2634,97 @@ async def create_custom_test_case(project_id: str, body: CustomTestCaseCreate, u
 
 
 @api.put("/projects/{project_id}/test-cases/{case_id}")
+async def update_custom_test_case(
+    project_id: str, case_id: str, body: CustomTestCaseUpdate, user: User = Depends(current_user),
+):
+    await require_permission(db, user.user_id, "test_cases:write")
+    existing = await db.custom_test_cases.find_one({"project_id": project_id, "case_id": case_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    updates: dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    if body.name is not None:
+        updates["name"] = body.name.strip()
+    if body.description is not None:
+        updates["description"] = body.description
+    if body.steps is not None:
+        for step in body.steps:
+            if step.action not in VALID_ACTIONS:
+                raise HTTPException(status_code=400, detail=f"Invalid action: {step.action}")
+        updates["steps"] = [s.model_dump() for s in body.steps]
+    if body.enabled is not None:
+        updates["enabled"] = body.enabled
+    if body.viewport is not None:
+        updates["viewport"] = body.viewport
+    await db.custom_test_cases.update_one({"case_id": case_id}, {"$set": updates})
+    return await db.custom_test_cases.find_one({"case_id": case_id}, {"_id": 0})
+
+
+@api.delete("/projects/{project_id}/test-cases/{case_id}")
+async def delete_custom_test_case(project_id: str, case_id: str, user: User = Depends(current_user)):
+    await require_permission(db, user.user_id, "test_cases:write")
+    result = await db.custom_test_cases.delete_one({"project_id": project_id, "case_id": case_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Test case not found")
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Test plan editor — pre-run AI plan
+# ----------------------------------------------------------------------------
+
+
+class TestPlanGenerateBody(BaseModel):
+    command: str = "/atmos test"
+    page_url: Optional[str] = None
+
+
+class TestPlanUpdateBody(BaseModel):
+    narrative: Optional[str] = None
+    focus_areas: Optional[list[str]] = None
+    test_cases: Optional[list[dict[str, Any]]] = None
+    status: Optional[str] = None
+
+
+class ProjectSettingsUpdate(BaseModel):
+    enable_dopamine_max: Optional[bool] = None
+    design_theme: Optional[str] = None
+    craft_gate_threshold: Optional[int] = None
+    craft_fail_on_regression: Optional[bool] = None
+    craft_api_token: Optional[str] = None  # set or rotate CI gate token
+
+
+@api.get("/projects/{project_id}/craft")
+async def get_project_craft(project_id: str, user: User = Depends(current_user)):
+    """Latest Craft Score + history — the category system of record."""
+    q = await project_query_for_user(db, user.user_id)
+    q["project_id"] = project_id
+    proj = await db.projects.find_one(q, {"_id": 0})
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+    runs = await db.test_runs.find(
+        {"project_id": project_id, "status": "completed", "summary.craft_score.overall": {"$exists": True}},
+        {"_id": 0, "run_id": 1, "command": 1, "completed_at": 1, "summary.craft_score": 1, "summary.craft_gate": 1, "summary.craft_baseline": 1},
+    ).sort("completed_at", -1).to_list(30)
+    history = [
+        {
+            "run_id": r["run_id"],
+            "command": r.get("command"),
+            "completed_at": r.get("completed_at"),
+            "craft_score": (r.get("summary") or {}).get("craft_score"),
+            "craft_gate": (r.get("summary") or {}).get("craft_gate"),
+            "craft_baseline": (r.get("summary") or {}).get("craft_baseline"),
+        }
+        for r in runs
+    ]
+    threshold = int(proj.get("craft_gate_threshold") if proj.get("craft_gate_threshold") is not None else DEFAULT_GATE_THRESHOLD)
+    latest = proj.get("latest_craft_score")
+    gate = proj.get("latest_craft_gate")
+    if latest and not gate:
+        gate = evaluate_gate(latest, threshold=threshold)
+    return {
+        "project_id": project_id,
+        "craft_score": latest,
+        "craft_gate": gate,
+        "run_id": proj.get("latest_craft_run_id"),
+        "threshold": threshold,
+        "fail_on_regression": bool(proj.get("craft_fail_on_regression", True)),
