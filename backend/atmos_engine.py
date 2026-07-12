@@ -837,3 +837,90 @@ async def crawl_and_capture(browser: Browser, start_url: str, run_id: str, on_pr
             seen.add(url)
             page_slug = f"page{idx:02d}"
             page_entry: dict[str, Any] = {
+                "url": url,
+                "slug": page_slug,
+                "title": "",
+                "captures": {},
+            }
+            for vp, ctx in contexts:
+                cap = await _capture_full_page(ctx, url, vp["label"], run_id, page_slug, kind="baseline")
+                page_entry["captures"][vp["label"]] = cap
+                if cap.get("ok") and not page_entry["title"]:
+                    page_entry["title"] = cap.get("title") or ""
+                if on_progress:
+                    try:
+                        await on_progress({
+                            "type": "page_capture",
+                            "url": url, "viewport": vp["label"],
+                            "ok": cap.get("ok"),
+                            "url_path": cap.get("url_path"),
+                            "title": cap.get("title", ""),
+                            "page_slug": page_slug,
+                            "page_index": idx,
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
+            pages.append(page_entry)
+    finally:
+        for _, ctx in contexts:
+            try:
+                await ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return {"pages": pages, "button_actions": button_actions}
+
+
+async def capture_routes_direct(
+    browser: Browser,
+    base_url: str,
+    routes: list[str],
+    run_id: str,
+    route_contexts: Optional[dict[str, dict[str, Any]]] = None,
+    on_progress=None,
+) -> dict[str, Any]:
+    """GitHub-repo mode: navigate directly to every extracted route and capture
+    screenshots.  No crawling needed — we already know the routes from source.
+
+    Also clicks ALL interactive elements on each page (including icon-only
+    controls like nav icons, tab-bar icons, menu triggers) to surface hidden
+    UI states and record button_actions.
+
+    Returns {pages, button_actions} in the same shape as crawl_and_capture.
+    """
+    base_url = base_url.rstrip("/")
+    button_actions: list[dict[str, Any]] = []
+
+    # ── 1) Click-through + icon discovery pass (desktop context) ───────
+    discovery_ctx = await _new_context(browser, VIEWPORTS[1])  # Desktop
+    discovery_page = await discovery_ctx.new_page()
+    visited_slugs: set[str] = set()
+
+    # Auth state we'll inject into every context so protected routes render real content.
+    _injected_auth: dict[str, str] = {}
+
+    async def _inject_auth(page: Page) -> None:
+        """Inject any auth localStorage keys discovered during the auth-route visit."""
+        if _injected_auth:
+            try:
+                await page.evaluate(
+                    "(state) => { for (const [k,v] of Object.entries(state)) localStorage.setItem(k,v); }",
+                    _injected_auth,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _is_auth_screen(url: str) -> bool:
+        """Quick check: is this URL pointing to an auth/lock route?"""
+        norm = _normalize(url).lower()
+        return any(kw in norm for kw in AUTH_DETECT_KEYWORDS)
+
+    async def _try_quick_unlock(page: Page) -> bool:
+        """Quick unlock attempt: inject auth localStorage + click 1 button.
+        Returns True if unlock succeeded (page no longer at auth screen).
+        """
+        try:
+            # Inject common auth state
+            await page.evaluate(
+                "() => { localStorage.setItem('isAuthenticated', 'true'); }"
+            )
