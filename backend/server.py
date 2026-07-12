@@ -2728,3 +2728,97 @@ async def get_project_craft(project_id: str, user: User = Depends(current_user))
         "run_id": proj.get("latest_craft_run_id"),
         "threshold": threshold,
         "fail_on_regression": bool(proj.get("craft_fail_on_regression", True)),
+        "history": history,
+    }
+
+
+@api.get("/projects/{project_id}/craft.md")
+async def get_project_craft_markdown(project_id: str, user: User = Depends(current_user)):
+    from fastapi.responses import PlainTextResponse
+    q = await project_query_for_user(db, user.user_id)
+    q["project_id"] = project_id
+    proj = await db.projects.find_one(q, {"_id": 0})
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+    run_id = proj.get("latest_craft_run_id")
+    summary = {"craft_score": proj.get("latest_craft_score"), "craft_gate": proj.get("latest_craft_gate"), "craft_baseline": {}}
+    if run_id:
+        run = await db.test_runs.find_one({"run_id": run_id}, {"_id": 0, "summary": 1})
+        if run and run.get("summary"):
+            summary = run["summary"]
+    md = render_craft_markdown(proj, summary)
+    return PlainTextResponse(md, media_type="text/markdown")
+
+
+@api.get("/projects/{project_id}/craft/gate")
+async def craft_gate_check(
+    project_id: str,
+    request: Request,
+    threshold: Optional[int] = None,
+    token: Optional[str] = None,
+):
+    """CI merge gate. Auth via session cookie OR project craft_api_token (?token= / X-Atmos-Token)."""
+    proj = await db.projects.find_one({"project_id": project_id}, {"_id": 0})
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    header_token = request.headers.get("x-atmos-token") or ""
+    provided = (token or header_token or "").strip()
+    expected = (proj.get("craft_api_token") or "").strip()
+    authed = False
+    if expected and provided and provided == expected:
+        authed = True
+    else:
+        try:
+            await current_user(request)
+            authed = True
+        except HTTPException:
+            authed = False
+    if not authed:
+        raise HTTPException(status_code=401, detail="Provide session or X-Atmos-Token / ?token=")
+
+    craft = proj.get("latest_craft_score")
+    if not craft:
+        raise HTTPException(status_code=409, detail="No craft score yet — run /atmos test first")
+    thr = int(threshold if threshold is not None else (
+        proj.get("craft_gate_threshold") if proj.get("craft_gate_threshold") is not None else DEFAULT_GATE_THRESHOLD
+    ))
+    # Recompute gate with optional override; include last baseline from latest run if present
+    baseline = None
+    run_id = proj.get("latest_craft_run_id")
+    if run_id:
+        run = await db.test_runs.find_one({"run_id": run_id}, {"_id": 0, "summary.craft_baseline": 1})
+        baseline = (run or {}).get("summary", {}).get("craft_baseline")
+    gate = evaluate_gate(
+        craft,
+        threshold=thr,
+        baseline_comparison=baseline,
+        fail_on_regression=bool(proj.get("craft_fail_on_regression", True)),
+    )
+    body = {
+        "project_id": project_id,
+        "run_id": run_id,
+        "craft_score": craft,
+        "gate": gate,
+        "passed": gate["passed"],
+    }
+    if not gate["passed"]:
+        raise HTTPException(status_code=422, detail=body)
+    return body
+
+
+@api.post("/projects/{project_id}/test-plans/generate")
+async def api_generate_test_plan(
+    project_id: str, body: TestPlanGenerateBody, user: User = Depends(current_user),
+):
+    await require_permission(db, user.user_id, "runs:start")
+    q = await project_query_for_user(db, user.user_id)
+    q["project_id"] = project_id
+    proj = await db.projects.find_one(q, {"_id": 0})
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+    ide = await get_ide_context(db, user.user_id)
+    summary = build_context_summary(ide.get("files") or [], ide.get("open_file")) if ide else None
+    plan = await generate_test_plan(
+        db, user.user_id, proj, body.command,
+        codebase_summary=summary,
