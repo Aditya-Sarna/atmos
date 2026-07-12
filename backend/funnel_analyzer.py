@@ -96,3 +96,101 @@ def _build_action_graph(
     """Build adjacency list from discovered button actions."""
     graph: dict[str, list[dict[str, Any]]] = {}
     page_urls = {_normalize_url(p["url"]): p for p in pages}
+
+    for act in button_actions:
+        src = _normalize_url(act.get("from") or act.get("route") or pages[0]["url"] if pages else "")
+        if not src:
+            continue
+        graph.setdefault(src, []).append({
+            "label": act.get("label", "Click"),
+            "to": _normalize_url(act["to"]) if act.get("to") else src,
+            "navigated": act.get("navigated", False),
+        })
+
+    # Fallback: link pages sequentially if graph is sparse
+    if len(graph) < 2 and len(pages) >= 2:
+        for i in range(len(pages) - 1):
+            a = _normalize_url(pages[i]["url"])
+            b = _normalize_url(pages[i + 1]["url"])
+            graph.setdefault(a, []).append({"label": f"Navigate to {pages[i+1].get('title', 'next')}", "to": b, "navigated": True})
+
+    return graph
+
+
+def _find_shortest_path(
+    graph: dict[str, list[dict[str, Any]]],
+    start: str,
+    goal_keywords: list[str],
+) -> Optional[list[dict[str, Any]]]:
+    """BFS for shortest click path to a goal-like action."""
+    if start not in graph and graph:
+        start = next(iter(graph.keys()))
+
+    queue: deque[tuple[str, list[dict[str, Any]]]] = deque([(start, [])])
+    visited: set[str] = {start}
+
+    while queue:
+        node, path = queue.popleft()
+        for edge in graph.get(node, []):
+            label_lower = edge["label"].lower()
+            new_path = path + [{"from": node, **edge}]
+
+            if any(kw in label_lower for kw in goal_keywords):
+                return new_path
+
+            dest = edge.get("to") or node
+            if dest not in visited:
+                visited.add(dest)
+                queue.append((dest, new_path))
+
+            if len(new_path) >= 12:
+                continue
+
+    # Return longest discovered path as fallback
+    if graph.get(start):
+        return [{"from": start, **graph[start][0]}]
+    return []
+
+
+async def _replay_funnel_path(
+    page: Page,
+    start_url: str,
+    path: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Replay funnel path in browser with annotations."""
+    steps_taken: list[dict[str, Any]] = []
+    await page.goto(start_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    await _settle(page)
+    await _show_funnel_step(page, 1, "Land on home page", 0)
+    steps_taken.append({"step": 1, "action": "Land on home", "url": start_url})
+
+    for i, edge in enumerate(path):
+        click_num = i + 1
+        label = edge.get("label", "Click")
+        await _show_funnel_step(page, i + 2, f"Click: {label}", click_num)
+        try:
+            await page.get_by_text(label, exact=False).first.click(timeout=6000)
+        except Exception:  # noqa: BLE001
+            try:
+                await page.get_by_role("button", name=label).first.click(timeout=4000)
+            except Exception:  # noqa: BLE001
+                await page.get_by_role("link", name=label).first.click(timeout=4000)
+        await _settle(page)
+        steps_taken.append({"step": i + 2, "action": f"Click: {label}", "url": page.url})
+
+        if edge.get("to") and edge.get("navigated"):
+            dest = edge["to"]
+            if _normalize_url(page.url) != _normalize_url(dest):
+                try:
+                    await page.goto(dest, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                    await _settle(page)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    return steps_taken
+
+
+async def analyze_conversion_funnel(
+    browser: Browser,
+    target_url: str,
+    pages: list[dict[str, Any]],
