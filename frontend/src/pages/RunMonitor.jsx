@@ -395,3 +395,102 @@ export default function RunMonitor() {
                       else toast.error("Token check failed", { description: r.data?.detail });
                     } catch (e) {
                       const detail = e?.response?.data?.detail || e.message;
+                      setTokenTestResult({ ok: false, detail });
+                      toast.error("Token check failed", { description: detail });
+                    } finally {
+                      setTestingToken(false);
+                    }
+                  }}
+                >
+                  {testingToken ? "Testing…" : "Test connection"}
+                </Button>
+              )}
+              <Link to={`/dashboard/new?project=${project?.project_id || ""}`}>
+                <Button variant="outline" className="rounded-full" data-testid="manage-github-token-button">
+                  {project?.has_github_token ? "Manage token" : "Enable PRs"}
+                </Button>
+              </Link>
+            </div>
+          </div>
+        )}
+
+        {/* Capability hero */}
+        <div className="lg:col-span-12 grid grid-cols-2 md:grid-cols-4 gap-3" data-testid="capability-hero">
+          {[
+            { id: "live",         icon: Radio,       title: "Real testing",        sub: "Crawl · click · screenshot · LLM audit" },
+            { id: "chaos",        icon: Users,       title: "Chaos Lab",           sub: "Architecture live stress · crash test" },
+            { id: "architecture", icon: Layers,      title: "Architecture",        sub: "Industry-peer benchmark + auto-PR" },
+            { id: "demand",       icon: CreditCard,  title: "Demand & copy",       sub: "What to build · how to say it" },
+          ].map((c) => {
+            const Icon = c.icon;
+            const active = activeTab === c.id || (c.id === "demand" && (activeTab === "copy" || activeTab === "demand"));
+            return (
+              <button
+                key={c.id}
+                onClick={() => setActiveTab(c.id === "demand" ? "demand" : c.id)}
+                data-testid={`cap-${c.id}`}
+                className={`text-left rounded-2xl border p-4 transition-all ${
+                  active ? "bg-[#1D1D1F] text-white border-[#1D1D1F]" : "bg-white border-black/10 hover:border-black/30"
+                }`}
+              >
+                <Icon className={`h-5 w-5 ${active ? "text-white" : "text-[#0071E3]"}`} strokeWidth={1.5} />
+                <div className={`font-medium text-sm mt-2 ${active ? "text-white" : ""}`}>{c.title}</div>
+                <div className={`text-[11px] mt-0.5 ${active ? "text-white/60" : "text-[#86868B]"}`}>{c.sub}</div>
+              </button>
+            );
+          })}
+        </div>
+        {/* LEFT: tabbed view — live capture / test cases (with playback) / issues with diffs */}
+        <section className="lg:col-span-8 space-y-4 md:space-y-6">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+            <TabsList className="bg-white border border-black/10 rounded-full h-11 p-1 flex-wrap" data-testid="run-tabs">
+              <TabsTrigger value="live" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-live">
+                Live capture
+              </TabsTrigger>
+              <TabsTrigger value="cases" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-cases">
+                Test cases {testCases.length > 0 && <span className="ml-1.5 text-xs opacity-70">({testCases.length})</span>}
+              </TabsTrigger>
+              <TabsTrigger value="issues" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-issues">
+                Issues {issues.length > 0 && <span className="ml-1.5 text-xs opacity-70">({issues.length})</span>}
+              </TabsTrigger>
+              <TabsTrigger value="fuzz" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-fuzz">
+                Fuzz {fuzzCases.length > 0 && <span className="ml-1.5 text-xs opacity-70">({fuzzCases.length})</span>}
+              </TabsTrigger>
+              <TabsTrigger value="chaos" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-chaos">
+                Chaos Lab
+              </TabsTrigger>
+              <TabsTrigger value="dopamine" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-dopamine">
+                Dopamine {(dopamineAnalysis?.dark_patterns?.length > 0 || dopamineAnalysis?.suggestions?.length > 0 || summary?.dopamine?.dark_patterns?.length > 0) && (
+                  <span className="ml-1.5 text-xs opacity-70">
+                    ({(dopamineAnalysis?.dark_patterns?.length || summary?.dopamine?.dark_patterns?.length || 0)
+                      + (dopamineAnalysis?.suggestions?.length || summary?.dopamine?.suggestions?.length || 0)})
+                  </span>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="architecture" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-architecture">
+                Architecture {architecture && <span className="ml-1.5 text-xs opacity-70">{architecture?.score?.overall ?? ""}</span>}
+              </TabsTrigger>
+              <TabsTrigger value="copy" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-copy">
+                Copy {copySuggestions.length > 0 && <span className="ml-1.5 text-xs opacity-70">({copySuggestions.length})</span>}
+              </TabsTrigger>
+              <TabsTrigger value="demand" className="rounded-full data-[state=active]:bg-[#1D1D1F] data-[state=active]:text-white px-4" data-testid="tab-demand">
+                Demand {demandReport?.top_gaps?.length > 0 && <span className="ml-1.5 text-xs opacity-70">({demandReport.top_gaps.length})</span>}
+              </TabsTrigger>
+            </TabsList>
+
+            {/* LIVE */}
+            <TabsContent value="live" className="space-y-4 md:space-y-6 mt-4">
+              {/* Live MJPEG-over-SSE stream — updates as Atmos crawls, clicks buttons, and fuzzes inputs */}
+              {latestFrame && (
+                <div className="card-elev p-4 md:p-5" data-testid="live-stream-panel">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2 text-xs text-[#86868B] uppercase tracking-[0.2em]">
+                      <Radio className="h-3.5 w-3.5 text-[#FF3B30] animate-pulse" />
+                      Live stream · {latestFrame.kind === "fuzz" ? "fuzz" : "exploration"}
+                    </div>
+                    <div className="text-xs font-mono text-[#86868B] truncate max-w-[60%]">{latestFrame.label}</div>
+                  </div>
+                  <div className="rounded-xl overflow-hidden border border-black/10 bg-black">
+                    <img
+                      src={`data:image/jpeg;base64,${latestFrame.image_b64}`}
+                      alt={latestFrame.label}
