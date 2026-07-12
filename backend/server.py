@@ -1506,3 +1506,97 @@ async def _execute_run(
                     await _emit(run_id, seq, "phase", {"phase": "fuzz", "label": "Boundary Input Fuzzing"})
                     for url in [p["url"] for p in pages[:4]]:
                         try:
+                            new_cases = await asyncio.wait_for(
+                                run_fuzz_suite(
+                                    browser,
+                                    url,
+                                    run_id,
+                                    on_progress=on_progress,
+                                    max_fields=4,
+                                    max_cases_per_field=8,
+                                ),
+                                timeout=FUZZ_URL_TIMEOUT_SECS,
+                            )
+                            fuzz_cases.extend(new_cases)
+                        except asyncio.TimeoutError:
+                            await _emit(run_id, seq, "log", {
+                                "level": "warning",
+                                "message": f"Fuzz timeout after {FUZZ_URL_TIMEOUT_SECS}s on {url}; continuing run.",
+                            })
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("fuzz failed on %s: %s", url, exc)
+
+                    if not fuzz_cases and flow_screens:
+                        await _emit(run_id, seq, "log", {
+                            "level": "info",
+                            "message": f"URL fuzz found no stable inputs; running live fuzz against {len(flow_screens)} discovered screen(s).",
+                        })
+                        try:
+                            live_fuzz = await fuzz_flow_screens(
+                                browser, flow_screens, run_id, on_progress=on_progress,
+                            )
+                            fuzz_cases.extend(live_fuzz)
+                            await _emit(run_id, seq, "log", {"level": "info",
+                                "message": f"Live screen fuzz: ran {len(live_fuzz)} case(s) with video."})
+                        except Exception as exc:
+                            logger.warning("fuzz_flow_screens failed: %s", exc)
+
+                # ── Phase 5b: Per-screen, context-aware test cases (with video) ─
+                screen_test_results: list[dict[str, Any]] = []
+                if flow_screens and profile["includes"]("screen_tests"):
+                    await _emit(run_id, seq, "phase", {"phase": "screen_tests", "label": "Per-Screen Test Cases"})
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Generating elaborate test cases for {len(flow_screens)} screen(s); recording a video per case."})
+                    try:
+                        screen_test_results = await generate_and_run_screen_tests(
+                            browser, flow_screens, run_id, project, on_progress=on_progress, db=db,
+                        )
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"Ran {len(screen_test_results)} per-screen test case(s) with video."})
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("screen tests failed: %s", exc)
+
+                # ── Phase 6: Architecture analysis (GitHub repo OR URL runtime) ─
+                arch_payload: Optional[dict[str, Any]] = None
+                if profile["includes"]("architecture") and source == "github" and repo_root is not None:
+                    await _emit(run_id, seq, "phase", {"phase": "architecture", "label": "Architecture Analysis"})
+                    try:
+                        arch_payload = await analyze_repo(repo_root, project["name"], app_type, db=db, user_id=project.get("user_id"))
+                        await _emit(run_id, seq, "architecture", arch_payload)
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"Architecture score: {arch_payload['score']['overall']}/100 · {len(arch_payload['suggestions'])} suggestions"})
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("arch analysis failed: %s", exc)
+                elif profile["includes"]("architecture") and pages:
+                    # URL-mode runtime audit — no source code, but we can still
+                    # observe the live surface and benchmark against industry peers.
+                    await _emit(run_id, seq, "phase", {"phase": "architecture", "label": "Architecture Analysis (URL mode)"})
+                    try:
+                        arch_payload = await analyze_url_run(pages, project["name"], app_type, project["url"], db=db, user_id=project.get("user_id"))
+                        await _emit(run_id, seq, "architecture", arch_payload)
+                        await _emit(run_id, seq, "log", {"level": "info",
+                            "message": f"Architecture score (URL mode): {arch_payload['score']['overall']}/100 · {len(arch_payload['suggestions'])} suggestions"})
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("URL-mode arch analysis failed: %s", exc)
+
+                # ── Phase 7: Real Playwright playback of plan/seed cases ─
+                emitted_cases = []
+                if profile["includes"]("test_cases"):
+                    await _emit(run_id, seq, "phase", {"phase": "test_cases", "label": "Live Test Case Playback"})
+                    if test_plan and enabled_cases_from_plan(test_plan):
+                        cases = [
+                            {
+                                "name": c["name"],
+                                "category": c.get("category", "UX"),
+                                "steps": c.get("steps", []),
+                                "expected_result": "pass",
+                                "explanation": c.get("rationale", "From approved test plan"),
+                                "frames": [],
+                            }
+                            for c in enabled_cases_from_plan(test_plan)
+                        ]
+                    elif source == "github" and pages:
+                        cases = _github_test_cases(pages, button_actions)
+                    else:
+                        cases = seed_test_cases(app_type, pages)
+
