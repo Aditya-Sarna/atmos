@@ -677,3 +677,51 @@ async def explore_app_flow(
     try:
         path: list[dict[str, Any]] = [{"op": "goto", "url": base_url}]
         await page.goto(base_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        await _settle(page)
+        await page.wait_for_timeout(SETTLE_MS)
+
+        for _step in range(max_steps):
+            if _timed_out() or len(screens) >= MAX_SCREENS:
+                break
+
+            # Register current state
+            await _register(page, path)
+
+            # ── Short-circuit: deterministic keypad PIN entry ──
+            # The VLM gets stuck on PIN screens because each digit click does
+            # not visibly change the screen until the *last* digit is entered,
+            # which trips the stagnation limit. Detect a keypad, tap all
+            # digits in one go, then let VLM evaluate the new screen.
+            kp_steps = await _enter_pin_keypad(page, memory)
+            if kp_steps:
+                path.extend(kp_steps)
+                await _settle(page)
+                await page.wait_for_timeout(SETTLE_MS)
+                vlm_stagnation = 0
+                # Re-register after PIN entry (page likely advanced).
+                await _register(page, path)
+                if _timed_out() or len(screens) >= MAX_SCREENS:
+                    break
+            
+            # Fetch elements and ask Gemini Flash
+            elements = await _extract_elements_meta(page)
+            if not elements:
+                logger.info("VLM Crawl: no interactive elements found on current page")
+                break
+
+            context = await _screen_context(page)
+            decision = await _call_vlm_decision(
+                page,
+                elements,
+                path,
+                context,
+                failed_targets,
+                vlm_stagnation,
+                db=db,
+                user_id=user_id,
+            )
+            if not decision or decision.get("done"):
+                break
+
+            actions = decision.get("actions") or []
+            if not isinstance(actions, list) or not actions:
