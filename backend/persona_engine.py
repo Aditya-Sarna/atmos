@@ -188,3 +188,98 @@ async def _audit_font_size(page: Page, min_px: int = 16) -> tuple[bool, str]:
             if (t.length < 8) continue;
             const f = parseFloat(getComputedStyle(el).fontSize);
             if (f < minPx) { small.push(t.slice(0, 40) + ' (' + Math.round(f) + 'px)'); if (small.length >= 3) break; }
+          }
+          return { ok: fs >= minPx && small.length === 0, body: fs, small };
+        }""",
+        min_px,
+    )
+    if result["ok"]:
+        return True, f"Body font {result['body']:.0f}px meets threshold"
+    parts = [f"body {result['body']:.0f}px"]
+    if result["small"]:
+        parts.append(f"small text: {', '.join(result['small'])}")
+    return False, "; ".join(parts)
+
+
+async def _audit_aria(page: Page) -> tuple[bool, str]:
+    result = await page.evaluate(
+        """() => {
+          const inputs = document.querySelectorAll('input:not([type=hidden]), select, textarea');
+          const missing = [];
+          for (const el of inputs) {
+            const name = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby')
+              || (el.id && document.querySelector('label[for="' + el.id + '"]')?.innerText);
+            if (!name && !el.getAttribute('placeholder')) {
+              missing.push(el.name || el.type || 'input');
+            }
+          }
+          return { ok: missing.length === 0, missing: missing.slice(0, 5) };
+        }"""
+    )
+    if result["ok"]:
+        return True, "All form controls have accessible names"
+    return False, f"Unlabeled inputs: {', '.join(result['missing'])}"
+
+
+async def _audit_landmarks(page: Page) -> tuple[bool, str]:
+    result = await page.evaluate(
+        """() => {
+          const main = document.querySelector('main, [role=main]');
+          const nav = document.querySelector('nav, [role=navigation]');
+          return { ok: !!(main || nav), hasMain: !!main, hasNav: !!nav };
+        }"""
+    )
+    if result["ok"]:
+        return True, "Page has semantic landmarks"
+    return False, "Missing main/nav landmarks — screen reader users lose context"
+
+
+async def _audit_primary_cta(page: Page) -> tuple[bool, str]:
+    result = await page.evaluate(
+        """() => {
+          const verbs = /^(get|start|try|sign|log|buy|add|continue|submit|create|join|book|shop)/i;
+          const buttons = [...document.querySelectorAll('button, a[href], [role=button]')];
+          const visible = buttons.filter(b => {
+            const r = b.getBoundingClientRect();
+            return r.width > 20 && r.height > 20 && r.top < innerHeight && r.bottom > 0;
+          });
+          const primary = visible.find(b => verbs.test((b.innerText || '').trim()));
+          return { ok: !!primary, label: primary ? (primary.innerText || '').trim().slice(0, 40) : null,
+                   count: visible.length };
+        }"""
+    )
+    if result["ok"]:
+        return True, f"Primary CTA found: '{result['label']}'"
+    return False, f"No clear primary action among {result['count']} visible controls"
+
+
+async def _audit_accelerators(page: Page) -> tuple[bool, str]:
+    result = await page.evaluate(
+        """() => {
+          const hints = document.body.innerHTML;
+          const hasSearch = !!document.querySelector('[type=search], input[placeholder*="Search" i], [aria-label*="search" i]');
+          const hasKbd = !!document.querySelector('kbd') || /⌘|ctrl\\+/i.test(hints);
+          const hasCmdPalette = /command.?palette|quick.?action|⌘K/i.test(hints);
+          return { ok: hasSearch || hasKbd || hasCmdPalette, hasSearch, hasKbd, hasCmdPalette };
+        }"""
+    )
+    parts = []
+    if result["hasSearch"]:
+        parts.append("global search")
+    if result["hasKbd"]:
+        parts.append("keyboard hints")
+    if result["hasCmdPalette"]:
+        parts.append("command palette")
+    if result["ok"]:
+        return True, f"Power-user accelerators: {', '.join(parts)}"
+    return False, "No keyboard shortcuts, search, or command palette detected — power users must click everything"
+
+
+async def _audit_click_depth(page: Page, base_url: str) -> tuple[bool, str, int]:
+    depth = await page.evaluate(
+        """() => {
+          const links = [...document.querySelectorAll('a[href], button')].filter(el => {
+            const r = el.getBoundingClientRect();
+            return r.width > 10 && r.height > 10;
+          });
+          return Math.min(links.length, 12);
