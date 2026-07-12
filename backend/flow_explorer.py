@@ -581,3 +581,51 @@ async def _execute_vlm_action(page: Page, action: dict[str, Any], elements: list
             return True, {"op": "press", "key": key}
 
         return False, None
+    except Exception as exc:
+        logger.warning("Failed executing VLM action: %s", exc)
+        return False, None
+
+
+# ---------------------------------------------------------------------------
+# Public entry-point
+# ---------------------------------------------------------------------------
+
+async def explore_app_flow(
+    browser: Browser,
+    base_url: str,
+    run_id: str,
+    *,
+    on_progress=None,
+    viewport: Optional[dict[str, Any]] = None,
+    max_steps: int = MAX_FLOW_STEPS,
+    max_duration_secs: int = 90,
+    db=None,
+    user_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Drive the app using the user's IDE vision model for exploration."""
+    vp = viewport or VIEWPORTS[0]
+    vp_label = vp["label"]
+    base_url = base_url.rstrip("/")
+
+    ctx: BrowserContext = await _new_context(browser, vp, record_video=True)
+    page = await ctx.new_page()
+
+    screens: list[dict[str, Any]] = []
+    pages_out: list[dict[str, Any]] = []
+    button_actions: list[dict[str, Any]] = []
+    by_sig: dict[str, dict[str, Any]] = {}
+    memory: dict[str, str] = {}
+    clicked_by_sig: dict[str, set[str]] = {}
+    started_at = time.monotonic()
+
+    def _timed_out() -> bool:
+        return (time.monotonic() - started_at) >= max_duration_secs
+
+    async def _register(p: Page, path: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+        sig = await _signature(p)
+        if sig in by_sig or len(screens) >= MAX_SCREENS:
+            return by_sig.get(sig)
+        txt = await _page_text(p)
+        pathname = _pathname(p.url)
+        idx = len(screens)
+        name = _screen_name(txt, pathname, idx)
