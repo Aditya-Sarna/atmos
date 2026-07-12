@@ -100,3 +100,105 @@ FEATURE_LABELS: dict[str, str] = {
 VERTICAL_COMPETITORS: dict[str, list[str]] = {
     "finance": ["Stripe", "Wise", "Revolut", "Cash App", "PayPal", "Brex"],
     "e-commerce": ["Shopify", "Amazon", "Etsy", "BigCommerce"],
+    "dashboard": ["Linear", "Notion", "Asana", "Monday.com", "Height"],
+    "calendar": ["Calendly", "Cal.com", "Google Calendar"],
+    "crypto": ["Phoenix", "Muun", "Breez", "BlueWallet", "Wallet of Satoshi", "Strike"],
+    "devtool": ["Cursor", "GitHub Copilot", "Linear", "Vercel", "Railway"],
+    "generic": ["Notion", "Stripe", "Linear", "Figma"],
+}
+
+VERTICAL_SUBS: dict[str, list[str]] = {
+    "finance": ["fintech", "personalfinance", "banking", "Entrepreneur"],
+    "e-commerce": ["ecommerce", "shopify", "smallbusiness"],
+    "dashboard": ["SaaS", "startups", "ProductManagement", "webdev"],
+    "calendar": ["productivity", "getdisciplined"],
+    "crypto": ["Bitcoin", "lightningnetwork", "CryptoCurrency", "bitcoin_devs"],
+    "devtool": ["cursor", "ChatGPTCoding", "LocalLLaMA", "ExperiencedDevs", "webdev"],
+    "generic": ["startups", "SaaS", "webdev", "ProductManagement"],
+}
+
+
+async def _fetch(url: str, *, timeout: float = 18.0, as_json: bool = False) -> Any:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=HEADERS) as client:
+        r = await client.get(url)
+        if r.status_code >= 400:
+            return {} if as_json else ""
+        return r.json() if as_json else r.text
+
+
+def _product_context_blob(
+    project: dict[str, Any],
+    pages: Optional[list[dict]],
+    page_summaries: Optional[list[dict]],
+    button_actions: Optional[list[dict]],
+) -> str:
+    parts = [
+        f"name={project.get('name')}",
+        f"url={project.get('url')}",
+        f"app_type={project.get('app_type')}",
+        f"github={project.get('github_owner')}/{project.get('github_repo')}"
+        if project.get("github_owner") else "",
+    ]
+    for p in (pages or [])[:12]:
+        parts.append(f"page:{p.get('title') or ''} {p.get('url') or ''}")
+    for s in (page_summaries or [])[:8]:
+        parts.append(f"summary:{s.get('summary') or ''}")
+    for a in (button_actions or [])[:20]:
+        parts.append(f"action:{a.get('label') or ''}")
+    return "\n".join(x for x in parts if x)[:6000]
+
+
+def _infer_vertical(project: dict[str, Any], blob: str) -> str:
+    """Prefer project.app_type; refine from crawl only when app_type is generic."""
+    app_type = (project.get("app_type") or "generic").lower().strip()
+    aliases = {
+        "fintech": "finance", "payments": "finance", "saas": "dashboard",
+        "productivity": "dashboard", "ecommerce": "e-commerce", "shop": "e-commerce",
+        "bitcoin": "crypto", "web3": "crypto", "wallet": "crypto",
+        "developer": "devtool", "devtools": "devtool",
+    }
+    if app_type and app_type not in {"generic", "other", "unknown", ""}:
+        mapped = aliases.get(app_type, app_type)
+        return mapped if mapped in VERTICAL_SUBS else mapped
+
+    b = blob.lower()
+    if re.search(r"\b(bitcoin|lightning|satoshi|non[- ]custodial|lnurl|bolt11)\b", b):
+        return "crypto"
+    if re.search(r"\b(cursor|copilot|claude\s*code|developer\s*tool|sdk)\b", b):
+        return "devtool"
+    if re.search(r"\b(stripe|payment|fintech|bank|invoice|kyc)\b", b):
+        return "finance"
+    if re.search(r"\b(shop|cart|checkout|storefront|sku)\b", b):
+        return "e-commerce"
+    if re.search(r"\b(calendar|scheduling|booking|availability)\b", b):
+        return "calendar"
+    if re.search(r"\b(dashboard|kanban|sprint|roadmap|workspace)\b", b):
+        return "dashboard"
+    return "generic"
+
+
+def _extract_context_terms(blob: str, name: str) -> list[str]:
+    stop = {
+        "about", "with", "from", "your", "this", "that", "have", "will", "home", "page",
+        "https", "http", "www", "com", "app", "apps", "product", "atmos", "summary",
+        "action", "title", "name", "url", "type", "github",
+    }
+    words = re.findall(r"[A-Za-z][A-Za-z0-9-]{3,}", blob or "")
+    scored: Counter = Counter()
+    name_l = (name or "").lower()
+    for w in words:
+        wl = w.lower()
+        if wl in stop or wl == name_l or wl.isdigit():
+            continue
+        scored[wl] += 1
+    return [w for w, _ in scored.most_common(12)][:8]
+
+
+def _category_label(vertical: str) -> str:
+    return {
+        "finance": "fintech / payments",
+        "e-commerce": "e-commerce / retail",
+        "dashboard": "SaaS / productivity",
+        "calendar": "scheduling / calendar",
+        "crypto": "crypto / wallets",
+        "devtool": "developer tools",
