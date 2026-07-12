@@ -93,3 +93,98 @@ def compute_craft_score(
     accessibility_audit: Optional[dict[str, Any]] = None,
     issue_counts: Optional[dict[str, Any]] = None,
     dopamine: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Build the canonical craft score object from a run summary slice."""
+    a11y = scores.get("accessibility")
+    if accessibility_audit and accessibility_audit.get("score") is not None:
+        a11y = accessibility_audit["score"]
+
+    integrity = None
+    if dopamine and dopamine.get("dark_pattern_score") is not None:
+        integrity = float(dopamine["dark_pattern_score"])
+    elif scores.get("integrity") is not None:
+        integrity = float(scores["integrity"])
+
+    components: dict[str, Optional[float]] = {
+        "accessibility": float(a11y) if a11y is not None else None,
+        "personas": _persona_avg(personas or []),
+        "ux": float(scores["ux"]) if scores.get("ux") is not None else None,
+        "design": _design_score(design_theory or {}),
+        "funnel": _funnel_score(funnel or {}),
+        "reliability": float(scores["reliability"]) if scores.get("reliability") is not None else None,
+        "competitive": _competitive_score(competitive_diffs or []),
+        "integrity": integrity,
+    }
+
+    # Severity penalty from open issues (incl. dark patterns)
+    counts = issue_counts or {}
+    severity_penalty = (
+        int(counts.get("accessibility") or 0) * 1.5
+        + int(counts.get("ux") or 0) * 1.2
+        + int(counts.get("functional") or 0) * 2.0
+        + int(counts.get("dark_pattern") or counts.get("Dark pattern") or 0) * 2.5
+    )
+
+    present = {k: v for k, v in components.items() if v is not None}
+    if not present:
+        overall = 50
+        weight_used = {}
+    else:
+        # Renormalize weights over available components
+        w_sum = sum(WEIGHTS[k] for k in present)
+        weight_used = {k: WEIGHTS[k] / w_sum for k in present}
+        overall = sum(present[k] * weight_used[k] for k in present)
+        overall = _clamp(overall - min(25, severity_penalty))
+
+    tier = (
+        "world_class" if overall >= 90
+        else "strong" if overall >= 80
+        else "competitive" if overall >= 70
+        else "needs_work" if overall >= 55
+        else "critical"
+    )
+
+    return {
+        "version": CRAFT_VERSION,
+        "overall": overall,
+        "tier": tier,
+        "components": {k: _clamp(v) if v is not None else None for k, v in components.items()},
+        "weights_used": {k: round(v, 3) for k, v in weight_used.items()},
+        "severity_penalty": round(min(25, severity_penalty), 1),
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def compare_to_baseline(current: dict[str, Any], baseline: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not baseline or baseline.get("overall") is None:
+        return {
+            "has_baseline": False,
+            "delta": None,
+            "component_deltas": {},
+            "regressions": [],
+            "improvements": [],
+        }
+    delta = int(current["overall"]) - int(baseline["overall"])
+    comp_deltas = {}
+    regressions = []
+    improvements = []
+    for key in WEIGHTS:
+        cur = (current.get("components") or {}).get(key)
+        base = (baseline.get("components") or {}).get(key)
+        if cur is None or base is None:
+            continue
+        d = int(cur) - int(base)
+        comp_deltas[key] = d
+        if d <= -5:
+            regressions.append({"component": key, "delta": d, "from": base, "to": cur})
+        elif d >= 5:
+            improvements.append({"component": key, "delta": d, "from": base, "to": cur})
+    return {
+        "has_baseline": True,
+        "baseline_overall": baseline["overall"],
+        "baseline_run_id": baseline.get("run_id"),
+        "delta": delta,
+        "component_deltas": comp_deltas,
+        "regressions": regressions,
+        "improvements": improvements,
+        "regressed": delta <= -3 or len(regressions) > 0,
