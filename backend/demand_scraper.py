@@ -508,3 +508,105 @@ async def scrape_play_and_google(plan: dict[str, Any]) -> list[dict[str, Any]]:
             for pid in seen[:2]:
                 detail = await _fetch(
                     f"https://play.google.com/store/apps/details?id={quote_plus(pid)}&hl=en&gl=us"
+                )
+                # Reviews / description chunks
+                chunks = re.findall(r">([^<]{50,280})<", detail or "")
+                desc = ""
+                m = re.search(r'itemprop="description"[^>]*>.*?<div[^>]*>(.*?)</div>', detail or "", re.S | re.I)
+                if m:
+                    desc = re.sub(r"<[^>]+>", " ", m.group(1))
+                if desc:
+                    evidence.append(_evidence(
+                        source="play_store",
+                        text=f"{name} ({pid}): {desc}",
+                        url=f"https://play.google.com/store/apps/details?id={pid}",
+                        weight=3,
+                        meta={"competitor": name, "package": pid},
+                    ))
+                reviewish = [
+                    t for t in chunks
+                    if re.search(r"\b(wish|please|missing|add|hate|love|bug|crash|confusing|slow|fee|login)\b", t, re.I)
+                ]
+                for t in reviewish[:12]:
+                    evidence.append(_evidence(
+                        source="play_store",
+                        text=t,
+                        url=f"https://play.google.com/store/apps/details?id={pid}",
+                        weight=2,
+                        meta={"competitor": name, "package": pid},
+                    ))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("play scrape failed %s: %s", name, exc)
+
+    for q in (plan.get("google_queries") or [])[:5]:
+        url = f"https://www.google.com/search?q={quote_plus(q)}&hl=en&num=12"
+        try:
+            html = await _fetch(url)
+            texts = re.findall(r">([^<]{45,240})<", html or "")
+            for t in texts[:25]:
+                if re.search(r"feature|missing|wish|add|need|slow|bug|confusing|review|fee|login|crash|price", t, re.I):
+                    evidence.append(_evidence(
+                        source="google_reviews",
+                        text=t,
+                        weight=2,
+                        meta={"query": q},
+                    ))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("google scrape failed: %s", exc)
+
+    return evidence
+
+
+# ── 3) Theme clustering + tier list ──────────────────────────────────────────
+
+
+def _cluster_themes(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Cluster by feature_ids + lightweight keyword stems from evidence."""
+    buckets: dict[str, dict[str, Any]] = {}
+
+    for ev in evidence:
+        ids = ev.get("feature_ids") or []
+        if not ids:
+            # Derive a soft theme from top nouns (skip banal stems)
+            words = re.findall(r"[a-zA-Z]{5,}", (ev.get("text") or "").lower())
+            stop = {
+                "about", "would", "could", "should", "their", "there", "these", "those",
+                "because", "really", "https", "feature", "change", "changes", "using",
+                "please", "thanks", "something", "anything", "without", "having", "which",
+                "where", "after", "before", "still", "other", "first", "being", "issue",
+                "issues", "github", "reddit", "review", "reviews", "google", "store",
+            }
+            words = [w for w in words if w not in stop]
+            soft = Counter(words).most_common(1)
+            ids = [f"theme:{soft[0][0]}"] if soft else ["theme:general"]
+
+        for fid in ids[:3]:
+            b = buckets.setdefault(fid, {
+                "theme_id": fid,
+                "label": FEATURE_LABELS.get(fid, fid.replace("theme:", "").replace("_", " ").title()),
+                "weight": 0,
+                "count": 0,
+                "sources": Counter(),
+                "examples": [],
+            })
+            b["weight"] += int(ev.get("weight") or 1)
+            b["count"] += 1
+            b["sources"][ev.get("source", "unknown")] += 1
+            if len(b["examples"]) < 5 and ev.get("snippet"):
+                b["examples"].append({
+                    "snippet": ev["snippet"],
+                    "source": ev.get("source"),
+                    "url": ev.get("url"),
+                    "weight": ev.get("weight"),
+                })
+
+    themes = sorted(buckets.values(), key=lambda x: x["weight"], reverse=True)
+    max_w = themes[0]["weight"] if themes else 1
+
+    def tier(w: float) -> str:
+        r = w / max_w
+        if r >= 0.75:
+            return "S"
+        if r >= 0.50:
+            return "A"
+        if r >= 0.30:
