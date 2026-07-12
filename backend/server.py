@@ -1224,3 +1224,97 @@ async def _execute_run(
                     await _emit(run_id, seq, "log", {"level": "info",
                         "message": "Flow explorer found few screens; falling back to shallow crawl."})
                     crawl = await crawl_and_capture(browser, target_url, run_id, on_progress=on_progress)
+                pages = crawl["pages"]
+                button_actions = crawl.get("button_actions", [])
+                if not pages or not any(any(c.get("ok") for c in p["captures"].values()) for p in pages):
+                    raise RuntimeError("No page captures succeeded — site may be blocking automated traffic.")
+
+                await _emit(run_id, seq, "app_graph", {
+                    "pages": [{"url": p["url"], "title": p["title"], "slug": p["slug"]} for p in pages],
+                    "button_actions": button_actions,
+                })
+                await _emit(run_id, seq, "log", {"level": "info",
+                    "message": f"Crawled {len(pages)} page(s) · {len(button_actions)} button clicks. Per-page vision analysis next."})
+
+                if test_plan:
+                    await _emit(run_id, seq, "test_plan", {
+                        "plan_id": test_plan.get("plan_id"),
+                        "narrative": test_plan.get("narrative"),
+                        "focus_areas": test_plan.get("focus_areas"),
+                        "test_cases": test_plan.get("test_cases"),
+                        "status": "executing",
+                    })
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Executing approved test plan — {len(enabled_cases_from_plan(test_plan))} enabled case(s)."})
+
+                # ── Design theory fundamentals ─────────────────────────
+                design_result: dict[str, Any] = {}
+                if profile["includes"]("design_theory"):
+                    await _emit(run_id, seq, "phase", {"phase": "design_theory", "label": "Design Fundamentals Audit"})
+
+                    async def design_progress(ev: dict[str, Any]) -> None:
+                        if ev.get("type") == "design_theory":
+                            await _emit(run_id, seq, "design_theory", ev)
+                        elif ev.get("type") == "design_theory_issue":
+                            await _emit(run_id, seq, "design_issue", ev)
+
+                    design_result = await analyze_design_theory(
+                        browser, target_url, run_id, app_type,
+                        theme_override=design_theme_override or project.get("design_theme"),
+                        on_progress=design_progress,
+                    )
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Design theory ({design_result.get('theme_label')}): {design_result.get('issue_count', 0)} issue(s), score {design_result.get('score')}/100"})
+
+                # ── Competitive side-by-side diff ──────────────────────
+                competitive_results: list[dict[str, Any]] = []
+                if profile["includes"]("competitive"):
+                    await _emit(run_id, seq, "phase", {"phase": "competitive", "label": "Competitive UX Diff"})
+                    first_cap = None
+                    if pages:
+                        for cap in pages[0].get("captures", {}).values():
+                            if cap.get("url_path"):
+                                first_cap = cap["url_path"]
+                                break
+
+                    async def comp_progress(ev: dict[str, Any]) -> None:
+                        if ev.get("type") == "competitive_diff":
+                            await _emit(run_id, seq, "competitive_diff", ev)
+
+                    competitive_results = await run_competitive_diffs(
+                        browser, target_url, run_id, app_type,
+                        your_screenshot_url=first_cap,
+                        on_progress=comp_progress,
+                        db=db,
+                        user_id=project.get("user_id"),
+                    )
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Competitive diff: {len(competitive_results)} side-by-side comparison(s) vs industry leaders."})
+
+                # ── Phase 2: Per-page LLM vision analysis (parallel batched) ──
+                aggregated_issues: list[dict[str, Any]] = []
+                page_summaries: list[dict[str, Any]] = []
+                vp_labels = [v["label"] for v in REAL_VIEWPORTS]
+                if profile["includes"]("per_page"):
+                    await _emit(run_id, seq, "phase", {"phase": "per_page", "label": "Per-Page Vision Analysis"})
+                    pages = pages[: int(profile.get("max_pages_analyze") or 12)]
+
+                # Bound concurrency so we don't blast the LLM provider.
+                ANALYSIS_CONCURRENCY = int(os.environ.get("ATMOS_PAGE_ANALYSIS_CONCURRENCY", "4"))
+                PER_PAGE_TIMEOUT = int(os.environ.get("ATMOS_PER_PAGE_TIMEOUT_SECS", "75"))
+                pages_for_analysis = pages if profile["includes"]("per_page") else []
+                focus_areas: list[str] = []
+                narrative = f"Atmos {profile.get('label', command)} on {project['name']}."
+                sem = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
+
+                async def _analyze_one(p: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+                    async with sem:
+                        try:
+                            res = await asyncio.wait_for(llm_analyze_page(project, p, db=db), timeout=PER_PAGE_TIMEOUT)
+                            return p, res
+                        except asyncio.TimeoutError:
+                            logger.warning("per-page analysis TIMED OUT for %s after %ds", p["url"], PER_PAGE_TIMEOUT)
+                            return p, {"page_summary": "", "issues": []}
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("per-page analysis failed for %s: %s", p["url"], exc)
+                            return p, {"page_summary": "", "issues": []}
