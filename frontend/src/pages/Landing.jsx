@@ -172,3 +172,88 @@ export default function Landing() {
                 ["personas", 72],
                 ["design", 81],
                 ["funnel", 69],
+              ].map(([k, v]) => (
+                <div key={k} className="rounded-xl bg-[#F5F5F7] p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-[#86868B]">{k}</div>
+                  <div className="font-display text-2xl tabular-nums mt-1">{v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="commands" className="max-w-7xl mx-auto px-6 md:px-8 py-24 md:py-32">
+        <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12">
+          <div className="max-w-2xl">
+            <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-3">Lenses</div>
+            <h2 className="font-display text-3xl md:text-4xl lg:text-5xl tracking-tight font-medium">
+              Specialized runs. <span className="text-[#86868B]">One Craft Score.</span>
+            </h2>
+          </div>
+          <p className="text-[#1D1D1F]/70 max-w-md text-base">
+            Each `/atmos` command specializes the pipeline — accessibility deep audit, mobile, demand, full suite — then rolls into the same score.
+          </p>
+        </div>
+
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3" data-testid="commands-grid">
+          {commands.map((c, i) => {
+            const Icon = COMMAND_ICONS[c.cmd] || Activity;
+            return (
+              <div
+                key={c.cmd}
+                className="card-elev p-5 hover:border-[#1D1D1F]/20 transition-all duration-300 anim-slide-up"
+                style={{ animationDelay: `${i * 40}ms` }}
+                data-testid={`command-card-${c.label.toLowerCase()}`}
+              >
+                <Icon className="h-5 w-5 text-[#1D1D1F]" strokeWidth={1.5} />
+                <div className="mt-4 font-mono text-xs text-[#86868B]">{c.cmd}</div>
+                <div className="mt-1 font-display text-lg font-medium">{c.label}</div>
+                <div className="mt-1 text-sm text-[#1D1D1F]/65 leading-snug">{c.desc}</div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section id="personas" className="bg-[#F5F5F7]">
+        <div className="max-w-7xl mx-auto px-6 md:px-8 py-24 md:py-32">
+          <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-3">Human simulation</div>
+          <h2 className="font-display text-3xl md:text-4xl tracking-tight font-medium max-w-2xl">
+            Seven personas. Measured rules. Video evidence.
+          </h2>
+          <div className="mt-12 grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {PERSONAS.map((p) => {
+              const Icon = p.icon;
+              return (
+                <div key={p.name} className="card-elev p-5">
+                  <Icon className="h-4 w-4 text-[#1D1D1F]" strokeWidth={1.5} />
+                  <div className="mt-3 font-display text-lg font-medium">{p.name}</div>
+                  <div className="mt-1 text-sm text-[#1D1D1F]/65">{p.focus}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
+      <section className="max-w-7xl mx-auto px-6 md:px-8 py-24 md:py-32 text-center">
+        <h2 className="font-display text-4xl md:text-5xl tracking-tight font-medium">
+          Make craft a merge requirement.
+        </h2>
+        <p className="mt-4 text-[#1D1D1F]/70 max-w-xl mx-auto">
+          Drop in the Atmos Craft Gate GitHub Action. Fail PRs when judgment regresses.
+        </p>
+        <Link to="/login">
+          <Button
+            size="lg"
+            className="mt-8 rounded-full bg-[#1D1D1F] hover:bg-black text-white px-8 h-12"
+            data-testid="footer-cta"
+          >
+            Start free <ArrowRight className="ml-2 h-4 w-4" />
+          </Button>
+        </Link>
+      </section>
+    </div>
+  );
+}
