@@ -394,3 +394,102 @@ async def run_chaos_lab(
     max_users: int = 500,
     step_factor: float = 2.0,
     hold_secs: float = 10.0,
+    include_payments: bool = False,
+    payment_provider: str = "stripe",
+    break_success_rate: float = DEFAULT_BREAK_SUCCESS,
+    break_p95_ms: float = DEFAULT_BREAK_P95_MS,
+    ide_files: Optional[list[dict[str, Any]]] = None,
+    on_progress: Optional[ProgressFn] = None,
+) -> dict[str, Any]:
+    """Execute fixed or crash-test stress with live architecture streaming."""
+    test_id = f"chaos_{uuid.uuid4().hex[:10]}"
+    urls = _normalize_pages(base_url, pages if scope == "pages" else pages)
+    if scope == "app" and not pages:
+        urls = _normalize_pages(base_url, ["/"])
+
+    graph = build_architecture_graph(
+        base_url=base_url,
+        pages=urls,
+        ide_files=ide_files,
+        include_payments=include_payments,
+    )
+
+    async def emit(kind: str, payload: dict[str, Any]) -> None:
+        if on_progress:
+            await on_progress({"type": kind, **payload})
+
+    await emit("chaos_started", {
+        "test_id": test_id,
+        "mode": mode,
+        "scope": scope,
+        "pages": urls,
+        "users": users,
+        "max_users": max_users,
+        "include_payments": include_payments,
+        "architecture": graph,
+    })
+
+    stages: list[dict[str, Any]] = []
+    breaking_point: Optional[int] = None
+    break_reason: Optional[str] = None
+
+    if mode == "crash":
+        # Ramp: start at users, multiply until break or max_users
+        level = max(1, int(users))
+        ceiling = max(level, int(max_users))
+        factor = max(1.25, float(step_factor))
+        while level <= ceiling:
+            stage = await _run_stage(
+                browser, urls, level, hold_secs,
+                include_payments=include_payments,
+                payment_provider=payment_provider,
+                graph=graph,
+                break_success_rate=break_success_rate,
+                break_p95_ms=break_p95_ms,
+                emit=emit,
+            )
+            stages.append(stage)
+            await emit("chaos_stage", {**stage, "test_id": test_id, "architecture": graph})
+            if stage["broken"]:
+                breaking_point = level
+                break_reason = stage.get("break_reason")
+                break
+            nxt = int(level * factor)
+            if nxt <= level:
+                nxt = level + max(5, level // 2)
+            if nxt > ceiling and level < ceiling:
+                level = ceiling
+            elif nxt > ceiling:
+                break
+            else:
+                level = nxt
+    else:
+        level = max(1, min(int(users), max(MAX_HTTP_CONCURRENCY, MAX_PLAYWRIGHT_USERS * 4)))
+        stage = await _run_stage(
+            browser, urls, level, hold_secs,
+            include_payments=include_payments,
+            payment_provider=payment_provider,
+            graph=graph,
+            break_success_rate=break_success_rate,
+            break_p95_ms=break_p95_ms,
+            emit=emit,
+        )
+        stages.append(stage)
+        await emit("chaos_stage", {**stage, "test_id": test_id, "architecture": graph})
+        if stage["broken"]:
+            breaking_point = level
+            break_reason = stage.get("break_reason")
+
+    last = stages[-1] if stages else {}
+    summary = {
+        "test_id": test_id,
+        "status": "completed",
+        "mode": mode,
+        "scope": scope,
+        "pages": urls,
+        "stages": stages,
+        "breaking_point_users": breaking_point,
+        "break_reason": break_reason,
+        "success_rate": last.get("success_rate"),
+        "error_rate": last.get("error_rate"),
+        "latency_p50_ms": last.get("latency_p50_ms"),
