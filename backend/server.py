@@ -2916,3 +2916,97 @@ class IdeLlmCompleteBody(BaseModel):
 
 @api.post("/ide/context")
 async def api_ide_context(body: IdeContextBody, user: User = Depends(current_user)):
+    doc = await store_ide_context(db, user.user_id, body.model_dump())
+    return {"ok": True, "file_count": doc.get("file_count", 0)}
+
+
+@api.get("/ide/context")
+async def api_get_ide_context(user: User = Depends(current_user)):
+    ctx = await get_ide_context(db, user.user_id)
+    if not ctx:
+        return {"files": [], "file_count": 0}
+    return ctx
+
+
+@api.put("/ide/llm-config")
+async def api_set_user_llm(body: UserLlmConfigBody, user: User = Depends(current_user)):
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    payload["user_id"] = user.user_id
+    # Default: native IDE mode — no key required
+    if payload.get("mode") == "ide_native" or not payload.get("base_url"):
+        payload["mode"] = "ide_native"
+        payload["enabled"] = True
+    await db.user_llm_configs.update_one(
+        {"user_id": user.user_id},
+        {"$set": payload},
+        upsert=True,
+    )
+    return {"ok": True, "mode": payload.get("mode"), "model": payload.get("model")}
+
+
+@api.get("/ide/llm-config")
+async def api_get_user_llm(user: User = Depends(current_user)):
+    from ide_llm_bridge import agent_is_online, get_agent
+    cfg = await get_user_llm_config(db, user.user_id)
+    online = await agent_is_online(db, user.user_id)
+    agent = await get_agent(db, user.user_id) if online else None
+    if not cfg:
+        return {"enabled": online, "mode": "ide_native" if online else None, "agent_online": online, "agent": agent}
+    safe = dict(cfg)
+    if safe.get("api_key"):
+        safe["api_key"] = "***"
+    safe["agent_online"] = online
+    safe["agent"] = agent
+    return safe
+
+
+@api.post("/ide/llm/heartbeat")
+async def api_ide_llm_heartbeat(body: IdeLlmHeartbeatBody, user: User = Depends(current_user)):
+    """Extension announces it can run prompts on the user's IDE model quota."""
+    from ide_llm_bridge import register_agent
+    doc = await register_agent(
+        db, user.user_id,
+        ide=body.ide,
+        models=body.models,
+        supports_vision=body.supports_vision,
+        extension_version=body.extension_version,
+        preferred_model=body.preferred_model,
+        preferred_vision_model=body.preferred_vision_model,
+    )
+    # Mark preferred mode as ide_native + store model picks
+    preferred = body.preferred_model or (body.models[0] if body.models else "ide-default")
+    await db.user_llm_configs.update_one(
+        {"user_id": user.user_id},
+        {"$set": {
+            "user_id": user.user_id,
+            "enabled": True,
+            "mode": "ide_native",
+            "model": preferred,
+            "preferred_model": body.preferred_model or preferred,
+            "preferred_vision_model": body.preferred_vision_model,
+            "provider": "ide_native",
+        }},
+        upsert=True,
+    )
+    return {
+        "ok": True,
+        "user_id": user.user_id,
+        "ide": doc.get("ide"),
+        "models": doc.get("models"),
+        "preferred_model": doc.get("preferred_model"),
+        "preferred_vision_model": doc.get("preferred_vision_model"),
+    }
+
+
+@api.get("/ide/llm/jobs/pending")
+async def api_ide_llm_pending(user: User = Depends(current_user), limit: int = 2):
+    from ide_llm_bridge import claim_pending_jobs
+    from datetime import datetime, timezone
+    # Keep agent online without wiping model list from heartbeat
+    await db.ide_llm_agents.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"last_seen": datetime.now(timezone.utc).isoformat(), "online": True}},
+        upsert=True,
+    )
+    jobs = await claim_pending_jobs(db, user.user_id, limit=min(limit, 3))
+    return {"jobs": jobs}
