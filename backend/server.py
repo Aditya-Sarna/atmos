@@ -3104,3 +3104,121 @@ async def api_demand_report(project_id: str, user: User = Depends(current_user))
         db=db,
         user_id=user.user_id,
         run_id=f"manual_{uuid.uuid4().hex[:8]}",
+    )
+    await db.demand_reports.insert_one({
+        **report,
+        "project_id": project_id,
+        "user_id": user.user_id,
+    })
+    report.pop("_id", None)
+    return report
+
+
+@api.get("/marketing-profiles")
+async def api_marketing_profiles():
+    return {"profiles": MARKETING_PROFILES}
+
+
+# ----------------------------------------------------------------------------
+# UI reference engine
+# ----------------------------------------------------------------------------
+
+
+@api.get("/references")
+async def search_references(q: str = "checkout", app_type: str = "generic", user: User = Depends(current_user)):
+    refs = await get_references_for_query(db, q, app_type, limit=12)
+    return {"query": q, "references": refs}
+
+
+@api.post("/references/refresh")
+async def refresh_references(app_type: str = "generic", user: User = Depends(current_user)):
+    await require_permission(db, user.user_id, "settings:write")
+    refs = await ensure_reference_cache(db, app_type)
+    return {"ok": True, "count": len(refs)}
+
+
+# ----------------------------------------------------------------------------
+# Misc
+# ----------------------------------------------------------------------------
+
+
+@api.get("/")
+async def root():
+    return {"service": "atmos", "ok": True}
+
+
+@api.get("/health")
+@api.get("/health/live")
+async def health_live():
+    return {"status": "ok", "service": "atmos"}
+
+
+@api.get("/health/ready")
+async def health_ready():
+    try:
+        await db.command("ping")
+        mongo_ok = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mongo ping failed: %s", exc)
+        mongo_ok = False
+    ready = mongo_ok
+    body = {
+        "status": "ready" if ready else "degraded",
+        "mongo": mongo_ok,
+        "auth_bypass": AUTH_BYPASS_MODE,
+        "env": os.environ.get("ATMOS_ENV", "development"),
+        "warnings": _startup_warnings,
+    }
+    if not ready:
+        raise HTTPException(status_code=503, detail=body)
+    return body
+
+
+@api.get("/commands")
+async def list_commands():
+    meta = {
+        "/atmos analyze": ("Analyze", "Design theory, competitive diffs, vision, architecture."),
+        "/atmos explore": ("Explore", "Longer journey discovery, screen tests, funnel benchmark."),
+        "/atmos test": ("Test", "Full suite — crawl, a11y, personas, fuzz, demand, report."),
+        "/atmos regress": ("Regress", "Fuzz + screen/custom Playwright cases + architecture."),
+        "/atmos mobile": ("Mobile", "Mobile-first viewports, a11y touch targets, personas."),
+        "/atmos benchmark": ("Benchmark", "Competitive, funnel, demand research, copy."),
+        "/atmos accessibility": ("Accessibility", "Deep contrast/ARIA/keyboard audit + a11y personas."),
+        "/atmos personas": ("Personas", "All human personas with annotated evidence."),
+        "/atmos record": ("Record", "Capture-heavy narrated playback of journeys."),
+        "/atmos report": ("Report", "Executive pack: design, competitive, demand, architecture."),
+    }
+    out = []
+    for cmd in sorted(VALID_COMMANDS):
+        profile = get_command_profile(cmd)
+        label, desc = meta.get(cmd, (profile.get("label") or cmd, profile.get("label") or ""))
+        out.append({
+            "cmd": cmd,
+            "label": label,
+            "desc": desc,
+            "profile_label": profile.get("label"),
+            "phases": sorted(profile["phases"]),
+        })
+    return out
+
+
+app.include_router(api)
+
+# Serve screenshots from /api/screens (mounted before CORS so headers apply correctly).
+app.mount("/api/screens", StaticFiles(directory=str(SCREENSHOTS_DIR)), name="screens")
+app.mount("/api/videos", StaticFiles(directory=str(VIDEOS_DIR)), name="videos")
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/api/reports", StaticFiles(directory=str(REPORTS_DIR)), name="reports")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    client.close()
