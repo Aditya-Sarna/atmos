@@ -378,3 +378,98 @@ DARK_PATTERN_CATALOG: list[dict[str, Any]] = [
     {
         "id": "forced_continuity",
         "name": "Forced continuity (trial → charge)",
+        "category": "forced_continuity",
+        "conversion_claim": "Auto-renew after trial captures users who forget to cancel.",
+        "how": "Free trial that auto-charges without a clear cancel path or reminder.",
+        "where": "Pricing, billing, trial signup.",
+        "risk": "Heavily regulated; chargeback / App Store rejection risk.",
+        "app_types": ["dashboard", "finance", "generic"],
+    },
+    {
+        "id": "roach_motel",
+        "name": "Roach motel (easy in, hard out)",
+        "category": "obstruction",
+        "conversion_claim": "Frictionless signup + buried cancel reduces churn.",
+        "how": "One-click join; cancel requires chat, mail, or multi-step retention maze.",
+        "where": "Subscriptions, memberships.",
+        "risk": "Illegal in several jurisdictions for subscription cancellation.",
+        "app_types": ["dashboard", "finance", "e-commerce", "generic"],
+    },
+    {
+        "id": "privacy_zuckering",
+        "name": "Privacy zuckering (bundled consent)",
+        "category": "privacy",
+        "conversion_claim": "Bundling 'agree to everything' maximizes data collection.",
+        "how": "One checkbox accepts terms + marketing + partner sharing.",
+        "where": "Signup, cookie banner.",
+        "risk": "GDPR / CCPA fines.",
+        "app_types": ["dashboard", "generic", "finance", "e-commerce"],
+    },
+    {
+        "id": "social_proof_pressure",
+        "name": "Fabricated social proof",
+        "category": "urgency",
+        "conversion_claim": "Live 'N people viewing' banners increase FOMO purchases.",
+        "how": "Show unverified purchase/view counts near the buy button.",
+        "where": "PDP, booking, pricing.",
+        "risk": "Fraudulent advertising if numbers are fake.",
+        "app_types": ["e-commerce", "generic"],
+    },
+    {
+        "id": "disguised_ad",
+        "name": "Disguised ads / bait CTAs",
+        "category": "disguised_ads",
+        "conversion_claim": "Ads styled as system UI get higher click-through.",
+        "how": "Promotional blocks that look like native notifications or 'Claim prize' buttons.",
+        "where": "Dashboard, feed, onboarding.",
+        "risk": "Platform policy + consumer-protection violations.",
+        "app_types": ["dashboard", "generic", "e-commerce"],
+    },
+    {
+        "id": "trick_question",
+        "name": "Trick questions / double-negative opt-out",
+        "category": "interface_interference",
+        "conversion_claim": "Confusing copy makes users consent by accident.",
+        "how": "Use 'Uncheck this box if you do not want to not receive offers'.",
+        "where": "Forms, preferences, checkout.",
+        "risk": "Clear unfair-practice exposure.",
+        "app_types": ["e-commerce", "finance", "generic", "dashboard"],
+    },
+]
+
+
+def _suggest_missing_dark_patterns(
+    detected: list[dict[str, Any]],
+    app_type: str,
+    *,
+    signals: Optional[dict[str, Any]] = None,
+) -> list[dict[str, Any]]:
+    """Suggest catalog dark patterns that are not already on the page."""
+    present_ids = {d.get("id") for d in detected if d.get("id")}
+    # Also match by category aliases from detector
+    present_cats = {d.get("category") for d in detected if d.get("category")}
+    at = app_type if app_type in {"finance", "e-commerce", "dashboard", "calendar", "generic"} else "generic"
+    out: list[dict[str, Any]] = []
+    for pat in DARK_PATTERN_CATALOG:
+        if pat["id"] in present_ids:
+            continue
+        if pat["category"] in present_cats and pat["id"] in {
+            # if we already flagged urgency broadly, still allow specific siblings
+        }:
+            pass
+        types = pat.get("app_types") or ["generic"]
+        if at not in types and "generic" not in types:
+            continue
+        # Light relevance: prefer checkout-ish suggestions when forms exist
+        if pat["id"] in {"hidden_costs", "prechecked_optin"} and signals and not signals.get("formCount"):
+            continue
+        out.append({
+            "id": f"suggest_{pat['id']}",
+            "pattern_id": pat["id"],
+            "name": pat["name"],
+            "category": pat["category"],
+            "status": "missing",
+            "conversion_claim": pat["conversion_claim"],
+            "how": pat["how"],
+            "where": pat["where"],
+            "risk": pat["risk"],
