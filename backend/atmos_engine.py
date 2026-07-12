@@ -489,3 +489,90 @@ async def _inject_patch_css(page: Page, css: str, *, emphasize_interaction: bool
             await page.keyboard.press("Tab")
         except Exception:  # noqa: BLE001
             pass
+
+    try:
+        await page.evaluate(
+            "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    await page.wait_for_timeout(450)
+
+
+def _screenshot_bytes(path: Path) -> Optional[bytes]:
+    try:
+        return path.read_bytes() if path.exists() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+ASYNC_DIAGNOSTIC_BANNER_JS = r"""(payload) => {
+    const root = document.body || document.documentElement;
+    if (!root) return;
+    const old = document.getElementById('atmos-diagnostic-banner');
+    if (old) old.remove();
+    const banner = document.createElement('div');
+    banner.id = 'atmos-diagnostic-banner';
+    banner.style.cssText = [
+        'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:2147483647',
+        'padding:14px 20px', 'font:600 14px/1.3 -apple-system, system-ui, sans-serif',
+        'color:#fff', `background:${payload.color}`, 'box-shadow:0 8px 24px rgba(0,0,0,0.18)',
+        'text-align:left', 'border-bottom:3px solid rgba(0,0,0,0.25)',
+    ].join(';') + ';';
+    banner.textContent = payload.text;
+    root.prepend(banner);
+    document.documentElement.style.scrollPaddingTop = '60px';
+}"""
+
+
+async def _add_diagnostic_banner(page: Page, text: str, color: str = "#FF9500") -> None:
+    try:
+        await page.evaluate(ASYNC_DIAGNOSTIC_BANNER_JS, {"text": text, "color": color})
+        await page.wait_for_timeout(120)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _write_pixel_diff(before_path: Path, after_path: Path, out_path: Path) -> Optional[dict[str, Any]]:
+    """Generate a side-by-side image with red overlay highlighting changed pixels.
+    Returns {changed_pct, diff_path} or None on failure."""
+    try:
+        from PIL import Image, ImageChops, ImageDraw  # type: ignore
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        a = Image.open(before_path).convert("RGB")
+        b = Image.open(after_path).convert("RGB")
+        # Pad shorter image so heights match
+        if a.size != b.size:
+            w = max(a.width, b.width)
+            h = max(a.height, b.height)
+            ca = Image.new("RGB", (w, h), "white"); ca.paste(a, (0, 0)); a = ca
+            cb = Image.new("RGB", (w, h), "white"); cb.paste(b, (0, 0)); b = cb
+        diff = ImageChops.difference(a, b).convert("L")
+        mask = diff.point(lambda p: 255 if p > 12 else 0)
+        changed = sum(mask.getdata()) / 255
+        total = mask.width * mask.height
+        pct = (changed / total * 100.0) if total else 0.0
+
+        overlay = b.copy()
+        red = Image.new("RGB", b.size, (255, 59, 48))
+        overlay.paste(red, mask=mask)
+
+        canvas_w = a.width + b.width + 16
+        canvas_h = max(a.height, b.height)
+        canvas = Image.new("RGB", (canvas_w, canvas_h), "white")
+        canvas.paste(a, (0, 0))
+        canvas.paste(overlay, (a.width + 16, 0))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((10, 6), "BEFORE", fill=(255, 59, 48))
+        draw.text((a.width + 26, 6), f"AFTER · {pct:.2f}% pixels changed", fill=(0, 113, 227))
+        canvas.save(out_path, format="PNG", optimize=True)
+        return {"changed_pct": round(pct, 3), "diff_path": out_path}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Pixel diff failed: %s", exc)
+        return None
+
+
+async def _capture_full_page(
+    context: BrowserContext, url: str, vp_label: str, run_id: str, page_slug: str, kind: str = "baseline",
