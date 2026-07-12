@@ -274,3 +274,95 @@ async def _llm_alternatives(
         for a in alts:
             pid = a.get("profile_id", "first_time_visitor")
             p = by_id.get(pid, MARKETING_PROFILES[2])
+            out.append({
+                "profile_id": pid,
+                "profile_label": p["label"],
+                "text": a.get("text", block["text"]),
+                "rationale": a.get("rationale", p["focus"]),
+                "marketing_angle": a.get("marketing_angle", p["focus"].split(",")[0]),
+            })
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("copy LLM failed: %s", exc)
+        return _deterministic_alternatives(block, app_type, project.get("name", ""))
+
+
+async def analyze_copywriting(
+    browser: Browser,
+    target_url: str,
+    project: dict[str, Any],
+    run_id: str,
+    *,
+    db=None,
+    user_id: Optional[str] = None,
+    on_progress: Optional[ProgressFn] = None,
+) -> dict[str, Any]:
+    """Extract live copy and produce marketing-profile alternatives."""
+    app_type = project.get("app_type") or "generic"
+    vp = VIEWPORTS[-1]
+    ctx = await _new_context(browser, vp)
+    page = await ctx.new_page()
+    suggestions: list[dict[str, Any]] = []
+
+    try:
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        await _settle(page)
+        blocks = await _extract_copy_blocks(page)
+
+        # Prioritize above-fold marketing surfaces
+        priority = sorted(
+            blocks,
+            key=lambda b: (
+                0 if b["role"] in ("headline", "cta", "supporting") else 1,
+                0 if b.get("above_fold") else 1,
+            ),
+        )[:10]
+
+        for block in priority:
+            scored = _score_copy(block["text"], block["role"], app_type)
+            alts = await _llm_alternatives(db, user_id, block, project, app_type) if db is not None else \
+                _deterministic_alternatives(block, app_type, project.get("name", ""))
+
+            item = {
+                "id": f"copy_{uuid.uuid4().hex[:8]}",
+                "role": block["role"],
+                "original": block["text"],
+                "above_fold": block.get("above_fold", False),
+                "score": scored["score"],
+                "issues": scored["issues"],
+                "alternatives": alts,
+                "page_url": target_url,
+            }
+            suggestions.append(item)
+            if on_progress:
+                await on_progress({"type": "copy_suggestion", **item})
+
+        avg = round(sum(s["score"] for s in suggestions) / max(len(suggestions), 1))
+        result = {
+            "app_type": app_type,
+            "voice": APP_TYPE_VOICE.get(app_type, APP_TYPE_VOICE["generic"]),
+            "profiles": MARKETING_PROFILES,
+            "suggestions": suggestions,
+            "blocks_analyzed": len(suggestions),
+            "avg_score": avg,
+            "summary": (
+                f"Analyzed {len(suggestions)} marketing copy blocks. "
+                f"Avg conversion-readiness {avg}/100. "
+                f"Alternatives tailored to {len(MARKETING_PROFILES)} user profiles."
+            ),
+        }
+        if on_progress:
+            await on_progress({"type": "copywriting_report", **result})
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("copywriting analysis failed: %s", exc)
+        return {
+            "app_type": app_type,
+            "suggestions": [],
+            "blocks_analyzed": 0,
+            "avg_score": 0,
+            "error": str(exc),
+            "summary": f"Copywriting analysis failed: {exc}",
+        }
+    finally:
+        await ctx.close()
