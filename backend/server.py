@@ -566,3 +566,97 @@ def _classify_app_type(url: str, name: str) -> str:
 @api.post("/projects")
 async def create_project(body: ProjectCreate, user: User = Depends(current_user)):
     gh_meta = parse_github_url(body.github_url) if body.github_url else None
+    if not body.url and not gh_meta:
+        raise HTTPException(status_code=400, detail="Provide a URL or a GitHub repository URL.")
+
+    if gh_meta:
+        clean_url = f"https://github.com/{gh_meta['owner']}/{gh_meta['repo']}"
+        source = "github"
+        display_url = clean_url
+    else:
+        parsed = urlparse(body.url if "://" in body.url else f"https://{body.url}")
+        clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+        if not parsed.netloc:
+            raise HTTPException(status_code=400, detail="Invalid URL")
+        display_url = clean_url
+        source = "url"
+
+    await ensure_org_for_user(db, user.user_id, user.email, user.name)
+    await require_permission(db, user.user_id, "projects:write")
+    member = await get_member(db, user.user_id)
+    org_id = member["org_id"] if member else None
+
+    project_id = f"proj_{uuid.uuid4().hex[:10]}"
+    proj = Project(
+        project_id=project_id,
+        user_id=user.user_id,
+        name=(body.name or "").strip() or (gh_meta["repo"] if gh_meta else urlparse(display_url).netloc),
+        url=display_url,
+        app_type=_classify_app_type(display_url, body.name),
+        source=source,
+        github_url=clean_url if source == "github" else None,
+        github_owner=gh_meta["owner"] if gh_meta else None,
+        github_repo=gh_meta["repo"] if gh_meta else None,
+        has_github_token=bool(body.github_token),
+    )
+    doc = proj.model_dump()
+    doc["created_at"] = doc["created_at"].isoformat()
+    doc["org_id"] = org_id
+    # Persist the PAT separately so it never leaks via /api/projects.
+    if body.github_token:
+        await db.project_secrets.update_one(
+            {"project_id": project_id},
+            {"$set": {"project_id": project_id, "github_token": body.github_token}},
+            upsert=True,
+        )
+    await db.projects.insert_one(doc)
+    return proj.model_dump()
+
+
+@api.post("/projects/{project_id}/github-token")
+async def update_project_github_token(project_id: str, body: ProjectGithubTokenUpdate, user: User = Depends(current_user)):
+    project = await db.projects.find_one({"project_id": project_id, "user_id": user.user_id}, {"_id": 0, "source": 1})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("source") != "github":
+        raise HTTPException(status_code=400, detail="Only GitHub projects can store a GitHub token.")
+
+    token = (body.github_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="GitHub token is required.")
+
+    await db.project_secrets.update_one(
+        {"project_id": project_id},
+        {"$set": {"project_id": project_id, "github_token": token}},
+        upsert=True,
+    )
+    await db.projects.update_one(
+        {"project_id": project_id},
+        {"$set": {"has_github_token": True}},
+    )
+    return {"ok": True, "has_github_token": True}
+
+
+@api.post("/projects/{project_id}/github-token/test")
+async def test_project_github_token(project_id: str, user: User = Depends(current_user)):
+    """Validate that the stored GitHub PAT can actually open a PR.
+
+    Checks:
+      1. Token exists.
+      2. Token authenticates to api.github.com (returns viewer login).
+      3. Token has access to the linked repo.
+      4. Token has the scopes required to create branches and PRs (repo or public_repo).
+    """
+    project = await db.projects.find_one({"project_id": project_id, "user_id": user.user_id}, {"_id": 0})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("source") != "github":
+        raise HTTPException(status_code=400, detail="Only GitHub projects can be tested.")
+
+    secret = await db.project_secrets.find_one({"project_id": project_id}, {"_id": 0})
+    token = (secret or {}).get("github_token")
+    if not token:
+        return {"ok": False, "stage": "missing", "detail": "No GitHub token stored for this project. Paste a Personal Access Token (with `repo` scope) on the New Run page."}
+
+    repo_full = f"{project['github_owner']}/{project['github_repo']}"
+
