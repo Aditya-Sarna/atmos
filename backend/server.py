@@ -1788,3 +1788,97 @@ async def _execute_run(
                 rel_count = sum(1 for i in emitted_issues if i["category"] == "Functional")
                 a11y_score = int(a11y_result.get("score") or 0)
                 summary = {
+                    "scores": {
+                        "accessibility": a11y_score if a11y_score else max(40, 96 - ax_count * 6),
+                        "ux": max(40, 94 - ux_count * 7),
+                        "reliability": max(40, 95 - rel_count * 8),
+                    },
+                    "counts": {
+                        "functional": sum(1 for i in emitted_issues if i["category"] == "Functional"),
+                        "visual": sum(1 for i in emitted_issues if i["category"] == "Visual"),
+                        "accessibility": ax_count,
+                        "performance": sum(1 for i in emitted_issues if i["category"] == "Performance"),
+                        "ux": ux_count,
+                    },
+                    "personas": personas,
+                    "issues": emitted_issues,
+                    "test_cases": emitted_cases,
+                    "custom_test_results": custom_case_results,
+                    "fuzz_cases": fuzz_cases,
+                    "benchmarks": bench_rows,
+                    "funnel": {
+                        "your_clicks": funnel_result.get("your_clicks"),
+                        "industry_avg": funnel_result.get("industry_avg"),
+                        "video_url": funnel_result.get("video_url"),
+                        "verdict": funnel_result.get("verdict"),
+                        "comparison": funnel_result.get("comparison"),
+                        "path": funnel_result.get("path"),
+                        "funnel_steps": funnel_result.get("funnel_steps"),
+                    },
+                    "design_theory": design_result,
+                    "competitive_diffs": competitive_results,
+                    "dopamine": dopamine_result,
+                    "copywriting": copywriting_result,
+                    "demand_intelligence": demand_result,
+                    "accessibility_audit": a11y_result,
+                    "command_profile": {"command": command, "label": profile.get("label"), "phases": sorted(profile["phases"])},
+                    "test_plan_id": test_plan.get("plan_id") if test_plan else None,
+                    "focus_areas": focus_areas,
+                    "narrative": narrative,
+                    "source": source,
+                    "button_actions": button_actions,
+                    "page_summaries": page_summaries,
+                    "architecture": arch_payload,
+                    "app_graph": [
+                        {"url": p["url"], "title": p["title"], "slug": p["slug"],
+                         "captures": {k: {"ok": v.get("ok"), "url_path": v.get("url_path")} for k, v in p["captures"].items()}}
+                        for p in pages
+                    ],
+                    **report,
+                }
+                # Craft Score — category system of record + baseline + gate
+                baseline_doc = await db.test_runs.find_one(
+                    {
+                        "project_id": project["project_id"],
+                        "status": "completed",
+                        "run_id": {"$ne": run_id},
+                        "summary.craft_score.overall": {"$exists": True},
+                    },
+                    {"_id": 0, "run_id": 1, "summary.craft_score": 1},
+                    sort=[("completed_at", -1)],
+                )
+                baseline_craft = None
+                if baseline_doc and baseline_doc.get("summary", {}).get("craft_score"):
+                    baseline_craft = {
+                        **baseline_doc["summary"]["craft_score"],
+                        "run_id": baseline_doc["run_id"],
+                    }
+                gate_threshold = int(
+                    project.get("craft_gate_threshold")
+                    if project.get("craft_gate_threshold") is not None
+                    else DEFAULT_GATE_THRESHOLD
+                )
+                attach_craft_to_summary(
+                    summary,
+                    baseline_craft=baseline_craft,
+                    gate_threshold=gate_threshold,
+                    run_id=run_id,
+                )
+                await db.projects.update_one(
+                    {"project_id": project["project_id"]},
+                    {"$set": {
+                        "latest_craft_score": summary["craft_score"],
+                        "latest_craft_gate": summary["craft_gate"],
+                        "latest_craft_run_id": run_id,
+                        "latest_craft_at": summary["craft_score"].get("computed_at"),
+                    }},
+                )
+                await db.test_runs.update_one(
+                    {"run_id": run_id},
+                    {"$set": {
+                        "status": "completed",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "summary": summary,
+                    }},
+                )
+                await _emit(run_id, seq, "summary", summary)
