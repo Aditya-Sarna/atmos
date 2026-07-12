@@ -186,3 +186,97 @@ export default function ChaosLabPanel({ runId, projectId, pages = [] }) {
       setBusy(false);
       toast.error("Chaos Lab failed to start", { description: e?.response?.data?.detail || e.message });
     }
+  };
+
+  const successPct = summary?.success_rate != null ? Math.round(summary.success_rate * 100) : null;
+  const logs = events.filter((e) => e.event === "chaos_log" || e.message).slice(-10).reverse();
+
+  return (
+    <div className="space-y-4" data-testid="chaos-lab-panel">
+      <div className="card-elev p-6 md:p-8">
+        <div className="flex items-start gap-4">
+          <div className="h-12 w-12 rounded-2xl bg-[#1D1D1F] flex items-center justify-center shrink-0">
+            <Layers className="h-6 w-6 text-white" strokeWidth={1.5} />
+          </div>
+          <div className="flex-1">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B]">Chaos Lab</div>
+            <div className="font-display text-2xl md:text-3xl mt-1">Live architecture stress.</div>
+            <p className="text-sm text-[#86868B] mt-2 max-w-2xl">
+              Select the entire app or specific pages (from crawl or IDE). Fixed concurrency, or crash-test —
+              ramp the thesis until the system breaks. HTTP volume + Playwright journeys stream into a live architecture diagram.
+              Payment pages get real Stripe test-card field probes.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-6 grid md:grid-cols-2 gap-4">
+          <div>
+            <div className="text-xs uppercase tracking-[0.15em] text-[#86868B] mb-2">Scope</div>
+            <div className="flex gap-2">
+              {[
+                { id: "app", label: "Entire app" },
+                { id: "pages", label: "Selected pages" },
+              ].map((o) => (
+                <button
+                  key={o.id}
+                  type="button"
+                  onClick={() => setScope(o.id)}
+                  className={`rounded-full px-4 py-2 text-sm border ${scope === o.id ? "bg-[#1D1D1F] text-white border-[#1D1D1F]" : "border-black/10 bg-white"}`}
+                  data-testid={`chaos-scope-${o.id}`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+            {scope === "pages" && (
+              <div className="mt-3 max-h-36 overflow-auto space-y-1" data-testid="chaos-page-picker">
+                {(pages.length ? pages : selected.map((u) => ({ url: u }))).map((p) => {
+                  const url = p.url || p;
+                  return (
+                    <label key={url} className="flex items-center gap-2 text-sm py-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(url)}
+                        onChange={() => togglePage(url)}
+                      />
+                      <span className="font-mono text-xs truncate">{url}</span>
+                    </label>
+                  );
+                })}
+                {!pages.length && (
+                  <div className="text-xs text-[#86868B]">No crawl pages yet — paste paths in IDE or wait for explore.</div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <div className="text-xs uppercase tracking-[0.15em] text-[#86868B] mb-2">Mode</div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setMode("fixed")}
+                className={`rounded-full px-4 py-2 text-sm border flex items-center gap-2 ${mode === "fixed" ? "bg-[#0071E3] text-white border-[#0071E3]" : "border-black/10 bg-white"}`}
+                data-testid="chaos-mode-fixed"
+              >
+                <Gauge className="h-3.5 w-3.5" /> Fixed load
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode("crash")}
+                className={`rounded-full px-4 py-2 text-sm border flex items-center gap-2 ${mode === "crash" ? "bg-[#FF3B30] text-white border-[#FF3B30]" : "border-black/10 bg-white"}`}
+                data-testid="chaos-mode-crash"
+              >
+                <ShieldAlert className="h-3.5 w-3.5" /> Crash test
+              </button>
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-[#86868B]">{mode === "crash" ? "Start users" : "Users"}</label>
+                <input
+                  type="number"
+                  min={5}
+                  max={500}
+                  value={users}
+                  onChange={(e) => setUsers(Number(e.target.value) || 10)}
+                  className="mt-1 w-full h-10 rounded-xl border border-black/10 px-3"
