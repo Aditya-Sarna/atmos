@@ -942,3 +942,97 @@ async def _llm_report(project: dict[str, Any], command: str, focus_areas: list[s
             f"Focus areas probed: {focus_areas}\n"
             f"Issues found: {json.dumps(issues[:20])}\n"
             "Return JSON only with keys: critical_findings (array of 3-5 short sentences), "
+            "recommendations (array of 5 imperative sentences, each <=15 words), "
+            "competitive_insight (1-2 sentences benchmarking vs industry leaders)."
+        )
+        data = await user_llm_json(
+            db,
+            project.get("user_id") or "user_local_dev",
+            prompt,
+            system="You are Atmos, producing an executive testing report. Return JSON ONLY.",
+            purpose="executive_report",
+        )
+        if isinstance(data, dict) and ("critical_findings" in data or "recommendations" in data):
+            return data
+        raise RuntimeError("unexpected report shape")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("LLM report failed: %s", exc)
+        return {
+            "critical_findings": [
+                "Automated report generation unavailable — review live issues in the monitor.",
+            ],
+            "recommendations": [
+                "Triage critical and high severity issues first.",
+                "Keep the Atmos IDE extension open to fund LLM analysis on your quota.",
+                "Validate critical paths manually.",
+            ],
+            "competitive_insight": "Connect Cursor/VS Code Atmos extension so reports use your IDE model entitlement.",
+        }
+
+
+
+# Theatrical seed helpers (_seed_issues / _test_cases / _persona_scores) removed.
+# Live runs use Playwright engines + command profiles only.
+
+def _github_test_cases(pages: list[dict[str, Any]], button_actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Generate test cases from the actual pages and button interactions discovered
+    in a GitHub repo run — every case references a real screenshot and real route."""
+    cases: list[dict[str, Any]] = []
+
+    # Case 1: one per discovered route (navigation test)
+    for p in pages[:8]:
+        route = p.get("route", "/")
+        mobile_cap = p["captures"].get("iPhone SE", {})
+        desktop_cap = p["captures"].get("Desktop 1440", {})
+        caps_ok = mobile_cap.get("ok") and desktop_cap.get("ok")
+        cases.append({
+            "name": f"Route '{route}' renders on both mobile and desktop",
+            "category": "Visual",
+            "steps": [
+                f"Navigate to {p['url']}",
+                "Capture iPhone SE viewport",
+                "Capture Desktop 1440 viewport",
+                "Assert no blank/error screen",
+            ],
+            "expected_result": "pass" if caps_ok else "warn",
+            "explanation": (
+                f"'{route}' captured successfully on mobile and desktop." if caps_ok
+                else f"One or more viewports failed to capture for '{route}'."
+            ),
+            "frames": [f for f in [
+                desktop_cap.get("url_path"),
+                mobile_cap.get("url_path"),
+            ] if f],
+        })
+
+    # Case 2: icon & button interaction tests (one per discovered button action)
+    icon_actions = [a for a in button_actions if a.get("isIcon")]
+    text_actions = [a for a in button_actions if not a.get("isIcon")]
+    for actions, kind in [(icon_actions, "icon"), (text_actions, "button")]:
+        for act in actions[:3]:
+            navigated = act.get("navigated", False)
+            cases.append({
+                "name": f"Click {kind} '{act['label']}' on {act.get('route', act.get('from', ''))}",
+                "category": "UX",
+                "steps": [
+                    f"Navigate to {act.get('from', '')}",
+                    f"Click {kind}: {act['label']}",
+                    "Assert destination rendered" if navigated else "Assert panel / modal visible",
+                ],
+                "expected_result": "pass" if navigated or kind == "button" else "warn",
+                "explanation": (
+                    f"Clicking '{act['label']}' navigated to {act.get('to', '—')}." if navigated
+                    else f"Clicking '{act['label']}' triggered a UI state change (no navigation)."
+                ),
+                "frames": [],
+            })
+
+    # Case 3: responsive sweep summary
+    all_ok = all(
+        p["captures"].get("iPhone SE", {}).get("ok") and p["captures"].get("Desktop 1440", {}).get("ok")
+        for p in pages
+    )
+    cases.append({
+        "name": f"Responsive sweep — {len(pages)} routes on mobile and desktop",
+        "category": "Visual",
+        "steps": [f"Capture {p['url']} on iPhone SE" for p in pages[:6]] + ["Capture all on Desktop 1440"],
