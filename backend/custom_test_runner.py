@@ -208,3 +208,110 @@ async def run_custom_test_case(
         logger.warning("custom test %s failed: %s", case_id, exc)
         try:
             await page.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "case_id": case_id,
+            "name": name,
+            "status": "fail",
+            "video_url": None,
+            "error": str(exc),
+            "step_results": step_results,
+            "source": "custom",
+        }
+    finally:
+        await ctx.close()
+
+
+async def run_custom_test_cases(
+    browser: Browser,
+    base_url: str,
+    cases: list[dict[str, Any]],
+    run_id: str,
+    on_progress: Optional[ProgressFn] = None,
+) -> list[dict[str, Any]]:
+    results = []
+    for case in cases:
+        results.append(await run_custom_test_case(browser, base_url, case, run_id, on_progress=on_progress))
+    return results
+
+
+def nl_step_to_action(step: str, base_url: str) -> dict[str, Any]:
+    """Best-effort map of natural-language plan steps → Playwright actions."""
+    import re
+    s = (step or "").strip()
+    low = s.lower()
+
+    m = re.search(r"(?:navigate|go|open|visit)\s+(?:to\s+)?(\S+)", low)
+    if m:
+        target = m.group(1).strip("'\"")
+        if target.startswith("http") or target.startswith("/"):
+            return {"action": "navigate", "url": target, "label": s}
+        return {"action": "navigate", "url": "/", "label": s}
+
+    m = re.search(r"(?:fill|type|enter)\s+['\"]?(.+?)['\"]?\s+(?:with|as|=)\s+['\"]?(.+?)['\"]?$", low)
+    if m:
+        return {"action": "fill", "selector": f"text={m.group(1).strip()}", "value": m.group(2).strip(), "label": s}
+
+    m = re.search(r"(?:click|tap|press)\s+(?:on\s+)?['\"]?(.+?)['\"]?$", low)
+    if m and "press tab" not in low and "press enter" not in low:
+        target = m.group(1).strip()
+        return {"action": "click", "text": target, "selector": f"text={target}", "label": s}
+
+    if "press tab" in low or low.strip() == "tab":
+        return {"action": "press", "key": "Tab", "label": s}
+    if "press enter" in low or "hit enter" in low:
+        return {"action": "press", "key": "Enter", "label": s}
+
+    if low.startswith("wait"):
+        ms = 800
+        num = re.search(r"(\d+)", low)
+        if num:
+            ms = int(num.group(1))
+            if ms < 50:
+                ms *= 1000
+        return {"action": "wait", "ms": min(ms, 5000), "label": s}
+
+    if low.startswith("assert") or low.startswith("verify") or low.startswith("expect"):
+        m = re.search(r"(?:see|visible|find)\s+['\"]?(.+?)['\"]?$", low)
+        if m:
+            return {"action": "assert_visible", "selector": f"text={m.group(1).strip()}", "label": s}
+        return {"action": "wait", "ms": 400, "label": s}
+
+    # Default: try click by visible text of the whole step (truncated)
+    snippet = s[:60]
+    return {"action": "click", "text": snippet, "selector": f"text={snippet}", "label": s}
+
+
+async def run_plan_cases_playwright(
+    browser: Browser,
+    base_url: str,
+    cases: list[dict[str, Any]],
+    run_id: str,
+    on_progress: Optional[ProgressFn] = None,
+) -> list[dict[str, Any]]:
+    """Execute plan / seeded cases as real Playwright steps (with video), not sleep theater."""
+    prepared = []
+    for case in cases:
+        raw_steps = case.get("steps") or []
+        actions = []
+        for st in raw_steps:
+            if isinstance(st, dict) and st.get("action"):
+                actions.append(st)
+            else:
+                actions.append(nl_step_to_action(str(st), base_url))
+        # Always start from base URL
+        if not actions or actions[0].get("action") != "navigate":
+            actions = [{"action": "navigate", "url": "/", "label": f"Open {base_url}"}] + actions
+        prepared.append({
+            "case_id": case.get("id") or case.get("case_id") or f"plan_{uuid.uuid4().hex[:8]}",
+            "name": case.get("name", "Plan case"),
+            "steps": actions,
+            "enabled": True,
+            "category": case.get("category", "UX"),
+            "explanation": case.get("explanation") or case.get("rationale") or "",
+            "expected_result": case.get("expected_result", "pass"),
+            "frames": case.get("frames") or [],
+            "source": "plan",
+        })
+    return await run_custom_test_cases(browser, base_url, prepared, run_id, on_progress=on_progress)
