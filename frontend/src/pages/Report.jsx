@@ -503,3 +503,89 @@ function ReportTestCases({ cases }) {
 function ArchitectureSection({ arch, runId }) {
   const score = arch?.score || {};
   const axes = score?.axes || {};
+  const suggestions = arch?.suggestions || [];
+  const peers = arch?.peer_comparison?.peers || [];
+  const nextMoves = arch?.peer_comparison?.next_3_moves || [];
+  const [busy, setBusy] = useState(null);
+  const [appliedIds, setAppliedIds] = useState({});
+
+  const apply = async (s) => {
+    setBusy(s.id);
+    try {
+      const r = await applyPatch(runId, { kind: "architecture", suggestion_id: s.id });
+      setAppliedIds((m) => ({ ...m, [s.id]: { url: r.data.url, number: r.data.number } }));
+      toast.success(`PR #${r.data.number} opened`, {
+        description: r.data.url,
+        action: { label: "Open", onClick: () => window.open(r.data.url, "_blank") },
+      });
+    } catch (e) {
+      toast.error("Could not open PR", { description: e?.response?.data?.detail || e.message });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mt-10" data-testid="report-architecture">
+      <div className="text-xs uppercase tracking-[0.2em] text-[#86868B] mb-2 flex items-center gap-2">
+        <Layers className="h-3.5 w-3.5" strokeWidth={1.75} /> Architecture
+      </div>
+      <h2 className="font-display text-2xl md:text-3xl tracking-tight font-medium mb-5">
+        Architecture score &middot; <span className="tabular-nums">{score.overall ?? "—"}</span>/100
+      </h2>
+
+      <div className="card-elev p-6 grid md:grid-cols-5 gap-3">
+        {Object.entries(axes).map(([k, v]) => (
+          <div key={k} className="rounded-xl bg-[#F5F5F7] p-3">
+            <div className="text-[10px] uppercase tracking-wider text-[#86868B]">{k}</div>
+            <div className="font-display text-2xl tabular-nums">{v}</div>
+          </div>
+        ))}
+      </div>
+
+      {peers.length > 0 && (
+        <div className="mt-4 card-elev p-6">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">How peers do it</div>
+          <div className="grid md:grid-cols-2 gap-3">
+            {peers.map((p, i) => (
+              <div key={i} className="rounded-xl border border-black/5 p-4">
+                <div className="font-medium">{p.name}</div>
+                <div className="text-xs text-[#86868B] mt-1">{architectureText(p.pattern || p.score)}</div>
+                <div className="text-sm mt-2">{architectureText(p.takeaway || p.detail || p.what_they_do_better || p.what_to_copy)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {suggestions.length > 0 && (
+        <div className="mt-4 card-elev p-6">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-[#86868B] mb-3">Architecture upgrades</div>
+          <div className="space-y-4">
+            {suggestions.map((s) => {
+              const applied = appliedIds[s.id];
+              return (
+                <div key={s.id} className="rounded-xl border border-black/5 p-4" data-testid={`arch-suggestion-${s.id}`}>
+                  <div className="flex gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium">{s.title}</div>
+                      <div className="text-sm text-[#1D1D1F]/80 mt-1">{s.summary || s.rationale}</div>
+                      {(s.files || []).length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mt-2">
+                          {s.files.map((f) => (
+                            <span key={f} className="inline-flex items-center gap-1 rounded-md bg-[#F5F5F7] px-2 py-0.5 text-[11px] font-mono text-[#1D1D1F]/70">
+                              {f}{s.file_line && s.files[0] === f ? `:${s.file_line}` : ""}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {s.peer_comparison && (
+                        <div className="text-[11px] text-[#86868B] mt-2">{s.peer_comparison}</div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => apply(s)}
+                      disabled={busy === s.id || !!applied}
+                      className="shrink-0 self-start rounded-full h-9 px-4 inline-flex items-center gap-1.5 bg-[#1D1D1F] text-white text-xs disabled:opacity-60"
+                      data-testid={`arch-apply-${s.id}`}
