@@ -1600,3 +1600,97 @@ async def _execute_run(
                     else:
                         cases = seed_test_cases(app_type, pages)
 
+                    async def plan_progress(ev: dict[str, Any]) -> None:
+                        et = ev.get("type")
+                        if et == "custom_test_start":
+                            await _emit(run_id, seq, "test_case", {
+                                "id": ev["case_id"], "name": ev["name"], "phase": "start",
+                                "steps": ev.get("steps", []), "status": "running", "source": "plan",
+                            })
+                        elif et == "custom_test_step":
+                            await _emit(run_id, seq, "test_case_step", {
+                                "case_id": ev["case_id"], "step_index": ev["step_index"],
+                                "step": ev["step"], "status": ev.get("status", "running"),
+                                "screenshot_url": ev.get("screenshot_url"), "source": "plan",
+                            })
+                        elif et == "custom_test_complete":
+                            emitted_cases.append({
+                                "id": ev["case_id"], "name": ev["name"],
+                                "status": ev.get("status", "fail"), "video_url": ev.get("video_url"),
+                                "steps": ev.get("step_results") or [], "source": "plan",
+                            })
+                            await _emit(run_id, seq, "test_case", {
+                                "id": ev["case_id"], "name": ev["name"], "phase": "end",
+                                "status": ev.get("status", "fail"), "video_url": ev.get("video_url"),
+                                "source": "plan",
+                            })
+
+                    try:
+                        await run_plan_cases_playwright(
+                            browser, target_url, cases, run_id, on_progress=plan_progress,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("plan case playback failed: %s", exc)
+
+                # ── Phase 7b: User-written custom test cases (Playwright video) ─
+                custom_case_results: list[dict[str, Any]] = []
+                custom_cases = await db.custom_test_cases.find(
+                    {"project_id": project["project_id"], "enabled": {"$ne": False}},
+                    {"_id": 0},
+                ).to_list(50)
+                if custom_cases and profile["includes"]("custom_tests"):
+                    await _emit(run_id, seq, "phase", {"phase": "custom_tests", "label": "Custom Test Cases"})
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": f"Running {len(custom_cases)} user-written test case(s) with video recording…"})
+
+                    async def custom_progress(ev: dict[str, Any]) -> None:
+                        et = ev.get("type")
+                        if et == "custom_test_start":
+                            await _emit(run_id, seq, "test_case", {
+                                "id": ev["case_id"], "name": ev["name"], "phase": "start",
+                                "steps": ev.get("steps", []), "status": "running", "source": "custom",
+                            })
+                        elif et == "custom_test_step":
+                            await _emit(run_id, seq, "test_case_step", {
+                                "case_id": ev["case_id"], "step_index": ev["step_index"],
+                                "step": ev["step"], "status": ev.get("status", "running"),
+                                "screenshot_url": ev.get("screenshot_url"), "source": "custom",
+                            })
+                        elif et == "custom_test_complete":
+                            await _emit(run_id, seq, "custom_test", ev)
+                            await _emit(run_id, seq, "test_case", {
+                                "id": ev["case_id"], "name": ev["name"], "phase": "end",
+                                "status": ev.get("status", "fail"), "video_url": ev.get("video_url"),
+                                "source": "custom",
+                            })
+
+                    custom_case_results = await run_custom_test_cases(
+                        browser, target_url, custom_cases, run_id, on_progress=custom_progress,
+                    )
+
+                # ── Phase 8: Real conversion funnel + benchmark ─────────
+                funnel_result: dict[str, Any] = {"benchmarks": [], "your_clicks": None, "industry_avg": None}
+                bench_rows: list[dict[str, Any]] = []
+                if profile["includes"]("benchmark"):
+                    await _emit(run_id, seq, "phase", {"phase": "benchmark", "label": "Conversion Funnel & Benchmark"})
+
+                    async def funnel_progress(ev: dict[str, Any]) -> None:
+                        if ev.get("type") == "benchmark":
+                            await _emit(run_id, seq, "benchmark", ev)
+                        elif ev.get("type") == "funnel_analysis":
+                            await _emit(run_id, seq, "funnel_analysis", ev)
+
+                    funnel_result = await analyze_conversion_funnel(
+                        browser, target_url, pages, button_actions, app_type, run_id,
+                        on_progress=funnel_progress,
+                    )
+                    bench_rows = funnel_result.get("benchmarks", [])
+                    await _emit(run_id, seq, "log", {"level": "info",
+                        "message": funnel_result.get("comparison", f"{funnel_result.get('your_clicks')} clicks to goal")})
+
+                # ── Dopamine + dark patterns ───────────────────────────
+                dopamine_result: Optional[dict[str, Any]] = None
+                if profile["includes"]("dopamine"):
+                    await _emit(run_id, seq, "phase", {"phase": "dopamine", "label": "Engagement & Dark Patterns"})
+                    engagement_max = bool(enable_dopamine_max or project.get("enable_dopamine_max"))
+
