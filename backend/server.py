@@ -2352,3 +2352,97 @@ async def apply_patch_to_repo(run_id: str, body: ApplyPatchBody, user: User = De
     if not proj or proj.get("source") != "github" or not proj.get("github_owner") or not proj.get("github_repo"):
         raise HTTPException(status_code=400, detail="This run isn't connected to a GitHub repository. Add the repo when creating the project to enable Apply.")
 
+    secret = await db.project_secrets.find_one({"project_id": proj["project_id"]}, {"_id": 0})
+    token = (secret or {}).get("github_token")
+    if not token:
+        raise HTTPException(status_code=400, detail="No GitHub token on file for this project — cannot open a PR.")
+
+    repo_full = f"{proj['github_owner']}/{proj['github_repo']}"
+    base_branch = body.base_branch or "main"
+
+    if body.kind == "issue":
+        if not body.issue_id:
+            raise HTTPException(status_code=400, detail="issue_id required")
+        issue = _find_issue(summary, body.issue_id)
+        if not issue:
+            raise HTTPException(status_code=404, detail="Issue not found in this run")
+        patch = PatchSpec(
+            kind="css_patch",
+            title=issue.get("title", "fix"),
+            body=issue.get("after", {}).get("detail", "") or issue.get("cause", ""),
+            css=issue.get("after", {}).get("code", ""),
+        )
+    elif body.kind == "alt":
+        if not body.issue_id or body.alt_index is None:
+            raise HTTPException(status_code=400, detail="issue_id and alt_index required")
+        issue = _find_issue(summary, body.issue_id)
+        if not issue:
+            raise HTTPException(status_code=404, detail="Issue not found")
+        alts = issue.get("alternatives") or []
+        if body.alt_index < 0 or body.alt_index >= len(alts):
+            raise HTTPException(status_code=400, detail="alt_index out of range")
+        alt = alts[body.alt_index]
+        patch = PatchSpec(
+            kind="css_patch",
+            title=f"{issue.get('title', 'fix')} ({alt.get('label', 'alternative')})",
+            body=alt.get("summary", "") + (f" — Trade-off: {alt['tradeoff']}" if alt.get("tradeoff") else ""),
+            css=alt.get("patch_css", ""),
+        )
+    elif body.kind == "architecture":
+        if not body.suggestion_id:
+            raise HTTPException(status_code=400, detail="suggestion_id required")
+        sugg = _find_arch_suggestion(summary, body.suggestion_id)
+        if not sugg:
+            raise HTTPException(status_code=404, detail="Suggestion not found")
+        if sugg.get("patch_kind") == "manual":
+            raise HTTPException(status_code=400, detail="This suggestion requires manual implementation; no auto-PR available.")
+        files = sugg.get("files") or []
+        if not files:
+            raise HTTPException(status_code=400, detail="Suggestion has no target file path.")
+        patch = PatchSpec(
+            kind=sugg.get("patch_kind", "file_create"),
+            title=sugg.get("title", "architecture change"),
+            body=sugg.get("patch_body") or "",
+            file_path=files[0],
+        )
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown kind: {body.kind}")
+
+    try:
+        result = await asyncio.to_thread(
+            open_pull_request,
+            repo_full,
+            token=token,
+            patch=patch,
+            base_branch=base_branch,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("PR creation failed: %s", exc)
+        # Surface a more useful diagnostic to the UI.
+        err_text = str(exc)
+        hint = ""
+        low = err_text.lower()
+        if "401" in low or "bad credentials" in low:
+            hint = " Tip: the stored GitHub token is invalid or expired. Use the Test connection button to re-validate it."
+        elif "403" in low and "rate" in low:
+            hint = " Tip: GitHub rate-limited the token; try again in a minute."
+        elif "403" in low:
+            hint = " Tip: the token lacks `repo` write access on this repository, or your org hasn't approved the PAT."
+        elif "404" in low:
+            hint = " Tip: the token cannot see this repo. For org-owned repos, the org must approve the PAT."
+        elif "422" in low and "branch" in low:
+            hint = " Tip: a branch with that name already exists — Atmos retries with a numeric suffix; try again."
+        raise HTTPException(status_code=502, detail=f"Could not open PR: {err_text}.{hint}")
+
+    await db.applied_patches.insert_one({
+        "run_id": run_id,
+        "user_id": user.user_id,
+        "kind": body.kind,
+        "issue_id": body.issue_id,
+        "alt_index": body.alt_index,
+        "suggestion_id": body.suggestion_id,
+        "pr_url": result["url"],
+        "pr_number": result["number"],
+        "branch": result["branch"],
+        "applied_at": datetime.now(timezone.utc).isoformat(),
+    })
