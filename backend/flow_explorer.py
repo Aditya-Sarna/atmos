@@ -533,3 +533,51 @@ Your response must be a single RAW minified JSON block matching this schema (JSO
 
 
 async def _execute_vlm_action(page: Page, action: dict[str, Any], elements: list[dict[str, Any]]) -> tuple[bool, Optional[dict[str, Any]]]:
+    """Tolerantly click or fill the element chosen by the VLM."""
+    try:
+        op = action.get("action")
+        el_id = action.get("element_id")
+        selector = action.get("selector")
+        text = action.get("text", "")
+        value = action.get("value", "")
+
+        matched = None
+        if el_id is not None:
+            matched = next((e for e in elements if e["id"] == el_id), None)
+        if not matched and text:
+            matched = next((e for e in elements if e["text"].strip().lower() == text.strip().lower()), None)
+        if not matched and selector:
+            matched = next((e for e in elements if e["selector"] == selector), None)
+
+        if op == "click":
+            if matched:
+                await page.mouse.click(matched["x"], matched["y"])
+                logger.info("Clicked coordinates (%d, %d) for text: %s", matched["x"], matched["y"], matched["text"])
+                return True, {"op": "click", "text": matched["text"], "rect": {"x": matched["x"], "y": matched["y"]}, "role": matched["tagName"]}
+            elif selector:
+                await page.click(selector, timeout=3000)
+                return True, {"op": "click", "selector": selector}
+            elif text:
+                await _click_button_by_text(page, {"text": text})
+                return True, {"op": "click", "text": text}
+
+        elif op == "fill":
+            target_selector = selector
+            if matched and matched["selector"]:
+                target_selector = matched["selector"]
+            
+            if target_selector:
+                await page.fill(target_selector, value, timeout=3000)
+                return True, {"op": "fill", "selector": target_selector, "value": value}
+            elif matched:
+                # Fallback to nth input focus-fill
+                loc = page.locator("button, a, [role=button], input, textarea, select, [role=tab]").nth(matched["id"])
+                await loc.fill(value)
+                return True, {"op": "fill", "selector": f"nth:{matched['id']}", "value": value}
+
+        elif op == "press":
+            key = action.get("key") or "Enter"
+            await page.keyboard.press(key)
+            return True, {"op": "press", "key": key}
+
+        return False, None
