@@ -576,3 +576,90 @@ def _write_pixel_diff(before_path: Path, after_path: Path, out_path: Path) -> Op
 
 async def _capture_full_page(
     context: BrowserContext, url: str, vp_label: str, run_id: str, page_slug: str, kind: str = "baseline",
+    inject_css: Optional[str] = None,
+) -> dict[str, Any]:
+    """Open a fresh page in the given context, fill visible forms, optionally
+    inject CSS, capture a FULL-PAGE PNG."""
+    page = await context.new_page()
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        await _settle(page)
+        # Match baseline state for patch captures so before/after differ only by the CSS fix.
+        await _fill_visible_forms(page)
+        await page.wait_for_timeout(300)
+        if inject_css:
+            await _inject_patch_css(page, inject_css)
+
+        fname = f"{run_id}_{_safe_name(page_slug)}_{_safe_name(vp_label)}_{kind}.png"
+        path = SCREENSHOTS_DIR / fname
+        png = await page.screenshot(full_page=True, timeout=20000)
+        path.write_bytes(png)
+        image_hash = hashlib.sha1(png).hexdigest()[:16]
+        title = ""
+        try:
+            title = (await page.title())[:120]
+        except Exception:  # noqa: BLE001
+            pass
+        video_url: Optional[str] = None
+        try:
+            if page.video:
+                # Must close page before the video file is finalized.
+                await page.close()
+                raw_video_path = await page.video.path()
+                if raw_video_path:
+                    vf = Path(raw_video_path)
+                    vname = f"{run_id}_{_safe_name(page_slug)}_{_safe_name(vp_label)}_{kind}.webm"
+                    vdest = SCREENSHOTS_DIR / vname
+                    if vf.exists():
+                        vdest.write_bytes(vf.read_bytes())
+                        video_url = f"/api/screens/{vname}"
+        except Exception:  # noqa: BLE001
+            video_url = None
+
+        return {
+            "ok": True,
+            "url_path": f"/api/screens/{fname}",
+            "title": title,
+            "image_hash": image_hash,
+            "video_url": video_url,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Full-page capture failed (%s @ %s): %s", url, vp_label, exc)
+        return {"ok": False, "error": str(exc)[:200]}
+    finally:
+        try:
+            await page.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _infer_route_action(route: str, context_hint: Optional[dict[str, Any]] = None) -> str:
+    r = (route or "").lower()
+    if any(k in r for k in ("send", "pay", "transfer", "checkout")):
+        return "submit_payment"
+    if any(k in r for k in ("receive", "request", "redeem")):
+        return "receive_flow"
+    if any(k in r for k in ("login", "signin", "auth", "onboarding", "lock")):
+        return "auth_flow"
+    if any(k in r for k in ("profile", "settings", "security", "backup")):
+        return "settings_flow"
+    if any(k in r for k in ("scan", "camera", "qr")):
+        return "scan_flow"
+    if context_hint and context_hint.get("action"):
+        return str(context_hint["action"])
+    return "generic"
+
+
+async def _perform_context_action(
+    page: Page,
+    *,
+    route: str,
+    context_hint: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Use route + code hint context to perform a relevant action.
+
+    This is intentionally deterministic and safe: fill forms, then click one
+    primary CTA that matches the route's likely intent.
+    """
+    action = _infer_route_action(route, context_hint)
+    filled = await _fill_visible_forms(page)
