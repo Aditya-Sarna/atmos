@@ -194,3 +194,102 @@ async def audit_page_a11y(page: Page, url: str) -> dict[str, Any]:
         len(miss) == 0,
         f"Unlabeled controls: {', '.join(miss)}" if miss else f"All sampled controls named ({aria.get('total', 0)})",
         "high" if len(miss) >= 2 else "medium",
+    )
+    add_check(
+        "Landmarks (main/nav)",
+        bool(landmarks.get("ok")),
+        "Has main/nav landmarks" if landmarks.get("ok") else "Missing main and navigation landmarks",
+        "medium",
+    )
+    add_check(
+        "Keyboard tab order",
+        bool(keyboard.get("ok")),
+        (
+            f"Tab trap suspected after {keyboard.get('tabs')} tabs"
+            if keyboard.get("trapped")
+            else f"{keyboard.get('interactive_hits')} interactive focuses in {keyboard.get('tabs')} tabs"
+        ),
+        "high" if keyboard.get("trapped") else "medium",
+    )
+    small = targets.get("small") or []
+    add_check(
+        "Touch target size (≥24px)",
+        bool(targets.get("ok")),
+        f"{len(small)} undersized targets" + (f" e.g. {small[0]['label']}" if small else ""),
+        "medium",
+    )
+
+    passed = sum(1 for c in checks if c["ok"])
+    score = max(35, min(98, round(40 + (passed / max(len(checks), 1)) * 55 - fail_n * 3 - len(miss) * 4)))
+    return {
+        "url": url,
+        "score": score,
+        "checks": checks,
+        "findings": findings,
+        "contrast_fails": contrast.get("fails") or [],
+        "keyboard": keyboard,
+    }
+
+
+async def run_accessibility_audit(
+    browser: Browser,
+    base_url: str,
+    pages: list[dict[str, Any]],
+    *,
+    deep: bool = False,
+    mobile_preferred: bool = False,
+    on_progress: Optional[ProgressFn] = None,
+) -> dict[str, Any]:
+    """Audit up to N pages with real DOM / keyboard checks."""
+    urls = []
+    for p in pages:
+        u = p.get("url")
+        if u and u not in urls:
+            urls.append(u)
+    if not urls:
+        urls = [base_url]
+    limit = 6 if deep else 3
+    urls = urls[:limit]
+
+    if mobile_preferred:
+        vp = next((v for v in VIEWPORTS if v.get("mobile")), VIEWPORTS[0])
+    else:
+        vp = next((v for v in VIEWPORTS if v["label"] == "Desktop 1440"), VIEWPORTS[0])
+    ctx = await _new_context(browser, vp, record_video=False)
+    page = await ctx.new_page()
+
+    page_reports: list[dict[str, Any]] = []
+    all_findings: list[dict[str, Any]] = []
+    try:
+        for url in urls:
+            if on_progress:
+                await on_progress({"type": "a11y_log", "message": f"Auditing accessibility on {url}"})
+            report = await audit_page_a11y(page, url)
+            page_reports.append(report)
+            all_findings.extend(report.get("findings") or [])
+            if on_progress:
+                await on_progress({
+                    "type": "a11y_page",
+                    "url": url,
+                    "score": report["score"],
+                    "findings": len(report.get("findings") or []),
+                })
+    finally:
+        await ctx.close()
+
+    avg = round(sum(r["score"] for r in page_reports) / max(len(page_reports), 1))
+    summary = (
+        f"Accessibility audit across {len(page_reports)} page(s): score {avg}/100, "
+        f"{len(all_findings)} finding(s). "
+        + ("Deep mode." if deep else "Standard sample.")
+    )
+    result = {
+        "score": avg,
+        "pages": page_reports,
+        "findings": all_findings[:40],
+        "summary": summary,
+        "deep": deep,
+    }
+    if on_progress:
+        await on_progress({"type": "a11y_report", **result})
+    return result
