@@ -673,3 +673,40 @@ def _deterministic_url_suggestions(pages: list[dict[str, Any]], app_type: str) -
             "id": f"url_a11y_{uuid.uuid4().hex[:6]}",
             "title": f"{len(unlabeled)} form input(s) lack accessible labels",
             "severity": "medium",
+            "category": "Accessibility",
+            "rationale": f"Sample: {sample}. Screen readers can't announce these fields.",
+            "patch_kind": "css",
+            "patch_css": "label { display: block; } input:not([aria-label]):not([id]) + * { outline: 2px solid #ff3b30 !important; }",
+        })
+
+    # 3. Heavy click depth = navigation problem
+    deepest = max((len(p.get("path_from_root") or []) for p in pages), default=0)
+    if deepest > 5:
+        out.append({
+            "id": f"url_depth_{uuid.uuid4().hex[:6]}",
+            "title": f"Some routes are {deepest} clicks deep from the landing page",
+            "severity": "low",
+            "category": "Information architecture",
+            "rationale": f"Industry rule of thumb is ≤3 clicks. {app_type} apps should expose key paths in the primary nav.",
+            "patch_kind": "manual",
+        })
+
+    return out
+
+
+async def _url_mode_peer_comparison(
+    project_name: str,
+    archetype: str,
+    pages: list[dict[str, Any]],
+    score: dict[str, Any],
+    db=None,
+    user_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """LLM peer comparison for URL-mode runs via the user's IDE model."""
+    if db is None:
+        return {"peers": [], "summary": "", "next_3_moves": []}
+
+    archetype_peers: dict[str, list[str]] = {
+        "ecommerce": ["Shopify Storefront", "Amazon", "Allbirds", "Glossier"],
+        "finance": ["Stripe Dashboard", "Plaid", "Wise", "Robinhood"],
+        "fintech": ["Stripe Dashboard", "Plaid", "Wise", "Robinhood"],
